@@ -206,7 +206,13 @@ impl Engine {
             }
             Requires::Ghidra => {
                 if !session.clean_room() {
-                    Availability::ok()
+                    match session.settings.ghidra_status().state {
+                        s if s.usable() => Availability::ok(),
+                        _ => {
+                            let (reason, remediation) = tools::deep::why_not_ghidra(&session.settings);
+                            Availability::no(reason, remediation)
+                        }
+                    }
                 } else {
                     Availability::no("This needs Deep mode (with Ghidra), and you're in Clean room mode.", "Turn on Deep mode in the title bar or Settings.")
                 }

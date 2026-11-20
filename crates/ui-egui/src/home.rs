@@ -167,7 +167,13 @@ pub fn modals(app: &mut CraftApp, ctx: &egui::Context) {
                 }
                 Modal::Engine(b) => crate::engine_ui::modal(app, ui, *b, &mut close),
                 Modal::Assets => crate::engine_ui::assets_modal(app, ui, &mut close),
-                Modal::Ghidra => crate::engine_ui::ghidra_modal(app, ui, &mut close),
+                Modal::Ghidra => {
+                    crate::engine_ui::ghidra_modal(app, ui, &mut close);
+                    // An upgrade asked for in Settings → Engines lasts for this dialog only.
+                    if close {
+                        app.ghidra.upgrade = false;
+                    }
+                }
                 Modal::GamePermission => crate::game_files::permission_modal(app, ui, &mut close),
                 Modal::DeepMode => crate::engine_ui::deep_modal(app, ui, &mut close),
                 Modal::ExistingFiles => crate::folders::existing_modal(app, ui, &mut close),

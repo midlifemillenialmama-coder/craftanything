@@ -43,6 +43,39 @@ const ANALYSIS_LIMIT_SECS: u64 = 8 * 3600;
 /// Deep mode is on but Ghidra isn't installed.
 pub const NOT_INSTALLED: &str = "Deep mode is on, but Ghidra isn't installed. The person can get Ghidra from Settings → Engines.";
 
+/// Why Ghidra can't be used, as (reason, remediation), from the one status verdict that every
+/// listing shows. What the builder sees here and what the availability panel says come from the
+/// same place, so neither can contradict the Settings page.
+pub fn why_not_ghidra(settings: &Settings) -> (String, String) {
+    use craft_anything_engines::ghidra::get::{GhidraJava, GhidraState, VERSION};
+    let st = settings.ghidra_status();
+    let hint = |st: &craft_anything_engines::ghidra::get::GhidraStatus| st.install.as_ref().map(|i| format!(" ({})", i.launcher.display())).unwrap_or_default();
+    match st.state {
+        GhidraState::Incomplete => (
+            format!("Deep mode is on, but Ghidra's install is incomplete: the folder{} has no headless launcher in it.", hint(&st)),
+            "Reinstall Ghidra from Settings → Engines, or choose its folder there.".into(),
+        ),
+        GhidraState::UnsupportedVersion => (
+            format!("Deep mode is on, but the Ghidra on this computer{} isn't supported any more.", hint(&st)),
+            format!("Install Ghidra {VERSION} from Settings → Engines."),
+        ),
+        GhidraState::JavaTooOld => match &st.java {
+            GhidraJava::NotJava(dir) => (
+                format!("Deep mode is on, but the folder set as Ghidra's Java ({}) has no bin/java in it, so Ghidra can't start.", dir.display()),
+                "Choose a folder holding a JDK in Settings → Engines, or clear the setting to use the one the guided install brings.".into(),
+            ),
+            GhidraJava::TooOld { found, needed, .. } => (
+                format!(
+                    "Deep mode is on, but the Java Ghidra would run on ({found}) is too old for it: Ghidra {VERSION} needs Java {needed}, so Ghidra wasn't started."
+                ),
+                format!("Install Java {needed} from Settings → Engines (Ghidra's setup brings it), or choose a newer Java folder there."),
+            ),
+            _ => (NOT_INSTALLED.into(), format!("Install Ghidra {VERSION} from Settings → Engines.")),
+        },
+        _ => (NOT_INSTALLED.into(), format!("Install Ghidra {VERSION} from Settings → Engines.")),
+    }
+}
+
 /// Get (or lazily create) the deep provider for the active target. `Err(Some(why))`: Deep mode is
 /// on but Ghidra can't be used; `Err(None)`: Clean room (never launches). Either way the caller
 /// uses the built-in engine.
@@ -70,7 +103,8 @@ fn provider_for_active(ctx: &mut Ctx<'_>) -> Result<Arc<dyn DeepDecompiler>, Opt
     let language = ctx.session.active().ok().and_then(|t| t.ext.get::<LanguageOverride>().map(|o| o.0.clone()));
     // Not remembered: once the person installs Ghidra, the next call uses it.
     let Some((cfg, digest)) = config(&ctx.session.settings, language) else {
-        return Err(Some(NOT_INSTALLED.into()));
+        let (reason, _) = why_not_ghidra(&ctx.session.settings);
+        return Err(Some(reason));
     };
     let cancel = ctx.cancel.clone();
     let cancel_fn = move || cancel.is_cancelled();
@@ -740,5 +774,25 @@ mod tests {
         assert_eq!(r["result"]["entry"], format!("{:#x}", l.code_va));
         assert!(r["result"].get("engine_entry").is_none(), "{r}");
         assert!(!r["limitations"].as_array().unwrap().iter().any(|x| x["code"] == "engine_rebased"));
+    }
+
+    /// A folder set as Ghidra's Java that holds no JDK is said as it is, not as a "Java 0".
+    #[test]
+    fn a_java_setting_that_is_not_a_jdk_is_said_as_it_is() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = Settings::default();
+        s.engines.store_dir = Some(d.path().join("engines"));
+        s.engines.only_configured = true;
+        let exe = if cfg!(windows) { "analyzeHeadless.bat" } else { "analyzeHeadless" };
+        let launcher = d.path().join("engines/ghidra/ghidra_12.2_PUBLIC/support").join(exe);
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::write(&launcher, b"x").unwrap();
+        let not_a_jdk = d.path().join("not-a-jdk");
+        std::fs::create_dir_all(&not_a_jdk).unwrap();
+        s.engines.ghidra.java_home = Some(not_a_jdk);
+        let (reason, remediation) = why_not_ghidra(&s);
+        assert!(reason.contains("no bin/java"), "{reason}");
+        assert!(!reason.contains("(0)"), "{reason}");
+        assert!(!remediation.is_empty());
     }
 }

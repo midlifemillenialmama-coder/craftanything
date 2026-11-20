@@ -126,8 +126,8 @@ fn serve(stream: TcpStream, expected: &str, saw_eof: &Arc<AtomicBool>) {
             break; // close on a bad token
         }
         let result = match req.method.as_str() {
-            "ping" => "{\"name\":\"fake\",\"provider\":{\"id\":\"ghidra\",\"version\":\"12.1.4\"},\"analysed\":true,\"analysis_cut_short\":false,\"target\":{\"name\":\"t\",\"image_base\":\"0x100000\"}}"
-                .to_string(),
+        "ping" => "{\"name\":\"fake\",\"provider\":{\"id\":\"ghidra\",\"version\":\"12.2\"},\"analysed\":true,\"analysis_cut_short\":false,\"target\":{\"name\":\"t\",\"image_base\":\"0x100000\"}}"
+            .to_string(),
             "native_functions_list" => "{\"functions\":[{\"name\":\"main\",\"address\":\"0x401000\"}]}".to_string(),
             // As the real bridge: a known function, code its analysis never made a function (made
             // on demand), and an address outside executable memory (refused with the reason).
@@ -165,6 +165,9 @@ fn framing_ping_and_methods() {
     let mut client = Client::connect(fake.addr, "secret-token", deadline).expect("connect");
     let info = client.ping(&no_cancel(), deadline).expect("ping");
     assert_eq!(info["provider"]["id"], "ghidra");
+    // The version is whatever the handshake said, kept as it is: it is never guessed at from
+    // folder names on our side.
+    assert_eq!(info["provider"]["version"], "12.2");
     assert_eq!(image_base_of(&info), Some(0x10_0000), "the handshake says where Ghidra loaded the program");
     assert_eq!(image_base_of(&serde_json::json!({"target": {"name": "t"}})), None, "an older bridge doesn't say");
 

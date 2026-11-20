@@ -792,7 +792,8 @@ launch or preview was run for this documentation correction.
   `--permission-mode plan`, where the CLI refuses writes and commands. The chosen model and depth
   go through `session/set_config_option` (`model`, then `thought_level`, because a model change can
   reset the depth). Our MCP server is added on the session without a `"type"` field. Extra
-  arguments are refused, and `acp = false` or an SSH host fails closed. Clean room is refused: the
+  arguments are refused, and so is `acp = false`: `--acp` is the only approval channel. Clean room
+  is refused: the
   adapter declares no file or terminal capability, so the CLI reads files itself in every mode.
   Sign-in is the CLI's own (`/login` in a CLI session, or `CODEBUDDY_API_KEY`); nothing is read.
   CodeBuddy reaches MCP tools through one wrapper (`DeferExecuteTool`), which the approval policy
@@ -800,9 +801,14 @@ launch or preview was run for this documentation correction.
   live catalogue validation, `plan` refusing a `mkdir`, `default` sending a permission request,
   and all our tools listed over the session. An SSH host is offered in Detect and runs the same
   ACP session through `ssh` (`acp_over_ssh`); that host needs `codebuddy` and
-  `craft-anything-cli`, and the build's preflight checks the helper there. A full build was not
-  reached: two turns explored without writing, and `bypassPermissions` changed nothing, so the
-  cause was the model, not the approvals. See [codebuddy.md](codebuddy.md).
+  `craft-anything-cli`, and the build's preflight checks the helper there. Live remote runs
+  against CodeBuddy 2.185.0 on an x86_64 Linux host: a question ran the whole ACP-over-ssh path,
+  `doctor` answered for the remote backend, and the remote helper answered an MCP `initialize`
+  with `--all-tools`; a whole remote build was not run (no API backend here for the study that
+  precedes a build). A full build was not reached: two turns explored without writing, and
+  `bypassPermissions` changed nothing, so the cause was the model, not the approvals. Windows was
+  not tried (npm shims there have failed starts before; see `docs/pitfalls.md`). See
+  [codebuddy.md](codebuddy.md).
 - Maki (`maki -p`, or over ACP with `acp = true`) is offered when adding a coding agent and found by
   Detect. Over ACP it asks us before commands, our own tools and writes outside its working folder;
   writes inside that folder (a build's project folder, our own records included) and every read

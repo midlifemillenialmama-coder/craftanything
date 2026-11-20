@@ -59,8 +59,11 @@ that won't say stops the run rather than being sent a relative folder, which ACP
 tool server is started from the absolute path that host reports too. A question starts no tool
 server, so only the folder is asked for.
 
-Live remote runs are unverified: the two hosts available when this landed had neither program
-installed.
+Live remote runs against CodeBuddy 2.185.0 on an x86_64 Linux host (`sg`): a question ran the
+whole ACP-over-ssh path — the ssh session, the folder that host reported, and the model's answer;
+`doctor` answered for the remote backend in 1.3 s; and the remote helper answered an MCP
+`initialize` with `--all-tools`. A whole remote build was not run: this computer had no API
+backend for the study that comes before a build.
 
 ## Model and thinking
 
@@ -121,6 +124,11 @@ A whole build did not finish. Two builder turns ran; the agent called `ToolSearc
 limit. `--permission-mode bypassPermissions` changed nothing, so approvals were not the cause: the
 model spent its turns exploring (`ls`, its own `ToolSearch`, the cargo registry) instead of
 writing. Two turns of one model say nothing final about CodeBuddy as a builder.
+
+All of this ran on macOS. Windows was not tried: CodeBuddy installs through npm there, and npm
+shims on Windows have failed starts here before (see `docs/pitfalls.md`, "Found on Windows, but
+\"isn't on your PATH\" when run" — `which` finds a `gemini.cmd`-style shim but a bare name starts
+only `.exe`). Until it is tried, say unknown rather than assume either way.
 
 Unit tests cover the argument refusal, the access modes, the session config queue, the model
 catalogue, the wrapper unwrapping, and the grants table.

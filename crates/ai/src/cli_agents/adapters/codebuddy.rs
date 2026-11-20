@@ -3,8 +3,9 @@
 
 use super::*;
 
-/// CodeBuddy's ACP-only adapter. `acp = false` and an SSH host fail closed: the documented way to
-/// drive CodeBuddy from another program is `--acp`, which is a local session.
+/// CodeBuddy's ACP-only adapter. `acp = false` fails closed: the documented way to drive CodeBuddy
+/// from another program is `--acp`, which speaks over stdio wherever it runs, so an SSH host
+/// carries the same session through `ssh`.
 pub struct CodeBuddy;
 
 impl AgentAdapter for CodeBuddy {

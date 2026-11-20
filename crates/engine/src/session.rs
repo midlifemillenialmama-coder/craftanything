@@ -1,3 +1,5 @@
+// Modifications (c) 2026 SuperSfera LLC, MIT OR Apache-2.0.
+
 //! The session: open targets, the evidence ledger, unknowns, annotations and caches.
 
 use crate::project::Project;
@@ -95,6 +97,12 @@ impl Session {
         Session { settings, ..Default::default() }
     }
 
+    /// The size cap for files this session opens (`u64::MAX` when this session sets no fixed cap).
+    /// Another session's settings do not change it.
+    pub fn max_target_bytes(&self) -> u64 {
+        crate::target::effective_max_target_bytes(self.settings.limits.max_target_bytes)
+    }
+
     /// A session that keeps everything under `dir` (config.toml, plugin caches, the engine store,
     /// new projects) instead of this computer's own folders: for tests, and anything that must not
     /// touch the person's setup.
@@ -143,7 +151,8 @@ impl Session {
         if targets.len() > 128 {
             return Err(ToolError::invalid("At most 128 targets can be shared with an agent."));
         }
-        let opened: Result<Vec<_>, _> = targets.iter().map(|target| target.open(self.clean_room())).collect();
+        let limit = self.max_target_bytes();
+        let opened: Result<Vec<_>, _> = targets.iter().map(|target| target.open(self.clean_room(), limit)).collect();
         for target in opened? {
             self.add_target(target);
         }

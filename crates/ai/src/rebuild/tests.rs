@@ -2922,6 +2922,31 @@ fn a_saved_asset_key_gets_an_api_builders_tool_past_the_key_check() {
     assert!(worker.assets, "the brief and the tools go by the same read");
 }
 
+/// A build attaches its investigation to the app's engine, so it is a project switch like any
+/// other: the target the person had open closes before the build's tools can record into the
+/// build's project. The app shows the project screen; going back to the target asks them to open
+/// it again. A build with its own session would keep the target open (see the roadmap gap).
+#[test]
+fn a_build_attach_closes_a_target_opened_in_another_project() {
+    use craft_anything_engine::project::{Project, Purpose};
+    use craft_anything_engine::target::Target;
+    let dir = tempfile::tempdir().unwrap();
+    let a = Project::create(&dir.path().join("a.cany"), "A", Purpose::Education).unwrap();
+    let ws = Workspace::create(&dir.path().join("build"), "B", "Build an app", TargetRef::None).unwrap();
+    let worker = check_worker(&ws, false);
+    {
+        let mut session = worker.engine.session();
+        session.open_project(a).unwrap();
+        session.add_target(Target::from_bytes(dir.path().join("tool.bin"), "tool.bin".into(), b"\x7fELF\x02\x01".to_vec()));
+        assert_eq!(session.targets().count(), 1, "A's target is open before the build starts");
+    }
+    worker.attach(&ws).unwrap();
+    let session = worker.engine.session();
+    assert_eq!(session.project.as_ref().map(|p| p.root.clone()), Some(ws.investigation_dir()), "the build's investigation is open");
+    assert_eq!(session.targets().count(), 0, "starting a build closes the target the person had open");
+    assert!(session.active_id().is_none(), "and nothing is selected");
+}
+
 /// A worker over a test session and the workspace's feed, for check tests.
 pub(crate) fn check_worker(ws: &Workspace, deep: bool) -> Worker {
     let mut s = craft_anything_engine::testing::session();

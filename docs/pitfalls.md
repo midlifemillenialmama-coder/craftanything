@@ -856,6 +856,14 @@ keystroke, so a dark gradient blinked over the line being typed. Unit tests look
 what's painted over it. When something flickers, render the frames (`Harness::render` at a
 fractional scale) and diff them, then list the shapes painted over the spot.
 
+**A copy kept in sync from one side only.** Each API-key build got an engine of its own that
+copied the app's asset keys before every tool call; a key removed through a build's own engine
+changed only that engine's copy, so the next call copied the app's older keys back and a build
+beside it never heard. And making that engine copied the app's session with a blocking lock, which
+`rebuild_start` already held, so starting a build from the tool deadlocked. State that several
+sessions must agree on lives outside them all, under a lock held for nothing else; anything that
+copies a session it may be called inside tries the lock and has a fallback.
+
 **A tool that locked the session it was called with.** `rebuild_question_ask` read the settings
 with `hub.engine.session()`, but a tool runs while its call holds the session, so the CLI waited
 forever before starting anything (found by the first live run, not by tests, which stopped

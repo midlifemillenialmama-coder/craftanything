@@ -286,6 +286,14 @@ impl RebuildRun {
             in_mode: saved_in_mode || transcript_in_mode,
             elsewhere: (ws.manifest.agent_session.is_some() && !saved_in_mode) || (ws.transcript_path().is_file() && !transcript_in_mode),
         };
+        // From the same read of the settings as the builder, so a change between two reads can't
+        // pair one entry's name with another's settings.
+        let extractor_entry = cfg.roles.get(crate::config::role_key(Role::Extractor)).and_then(|n| cfg.get(n)).filter(|b| b.config.enabled).cloned();
+        // Every run works in an engine of its own, in the mode it starts in. The app's session points
+        // at one project at a time, so a run working in it beside another would send its files,
+        // journal and asset spending to the other's project.
+        let run_hub = hub.for_a_run(run_deep);
+        let hub = &run_hub;
         // An API backend builds with our own agent loop and the Build tools; its conversation is
         // kept in the project and continued by follow-ups (a fresh build starts a new one).
         let api = match entry.config.kind {
@@ -304,7 +312,7 @@ impl RebuildRun {
         // A chosen extractor (an API backend, e.g. Kimi K3) takes a game's files out after a fresh
         // study; the run only uses it in Deep mode on a game (see Worker::extract).
         let fresh = opts.message.is_none() || !capture_in_mode(&ws, run_deep);
-        let extractor = match hub.chosen(Role::Extractor).and_then(|n| hub.config().get(&n).cloned()) {
+        let extractor = match extractor_entry {
             Some(e) if fresh && e.config.kind != BackendKind::AgentCli && !clean_room => {
                 let _ = std::fs::remove_file(ws.root.join(EXTRACT_TRANSCRIPT));
                 Some((e.config.name.clone(), hub.start_extractor(&e, opts.beginner, Some(ws.root.join(EXTRACT_TRANSCRIPT)))?))
@@ -671,23 +679,34 @@ impl Worker {
 
     /// An API backend's builder runs its tools in this session, not in a tool server that loads the
     /// keys itself (#923). Read on the worker because the keychain can block, and for each run so a
-    /// key saved outside the app since the last one counts. The session stays held through the
-    /// read, so a key removed meanwhile can't be put back by keys read before it went. What the
+    /// key saved outside the app since the last one counts. They're shared with the app's engine
+    /// and the runs beside it, so a key saved or removed in any of them updates all
+    /// ([`Engine::load_asset_keys`]), and keys read before a change can't land after it. What the
     /// brief says about assets comes from the same read, so the two agree.
     fn load_asset_keys(&mut self, store: &crate::KeyStore) {
         let mut session = self.engine.session();
         session.label("Load the asset keys");
         let providers = session.ext.get::<craft_anything_engines::assets::AssetProviders>().map(|p| p.as_ref().clone()).unwrap_or_default();
-        let keys = crate::keys::asset_keys(store, &providers);
+        let keys = self.engine.load_asset_keys(&mut session, || crate::keys::asset_keys(store, &providers));
         // The brief offers the built-in models, so a key for another provider doesn't count.
         self.assets = craft_anything_engines::assets::AssetProviders::built_in().ids().into_iter().any(|id| keys.get(id).is_some());
-        session.ext.insert(Arc::new(keys));
     }
 
-    /// Point the engine at this workspace: its investigation project and inbox.
+    /// The engine whose session the app shows: the app's, beside a run with an engine of its own.
+    fn shown(&self) -> Arc<Engine> {
+        self.engine.app().unwrap_or_else(|| self.engine.clone())
+    }
+
+    /// Point the engine at this workspace: its investigation project and inbox. A run with an
+    /// engine of its own opens the project in the app's session too, for what the app shows, as
+    /// a run in that session does. Not its inbox: none of this run's tools ask there, and a run
+    /// working in the app's session beside it would post its questions to this project (#943).
     fn attach(&self, ws: &Workspace) -> Result<(), ToolError> {
         let dir = ws.investigation_dir();
         let project = Project::open(&dir).or_else(|_| Project::create(&dir, &ws.manifest.name, Purpose::default()))?;
+        if let Some(app) = self.engine.app() {
+            app.session().open_project(project.clone())?;
+        }
         let mut s = self.engine.session();
         s.open_project(project)?;
         s.ext.insert(Arc::new(InboxDir(ws.inbox_dir())));
@@ -1351,7 +1370,7 @@ impl Worker {
             for e in agent.poll() {
                 refresh |= matches!(e, AgentEvent::ToolFinished { .. });
                 if matches!(e, AgentEvent::TurnDone { .. }) {
-                    refresh_investigation(&mut self.engine.session(), ws);
+                    refresh_investigation(&mut self.shown().session(), ws);
                     refresh = false;
                 }
                 match &e {
@@ -1398,7 +1417,7 @@ impl Worker {
                     return Ok(reply);
                 }
             }
-            if refresh && let Some(mut session) = self.engine.try_session() {
+            if refresh && let Some(mut session) = self.shown().try_session() {
                 refresh_investigation(&mut session, ws);
                 refresh = false;
             }

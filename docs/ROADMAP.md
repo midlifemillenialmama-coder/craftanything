@@ -736,12 +736,16 @@ Owner: open · Status: todo
 - [x] A saved fal.ai key reaches an API-key build's asset tools; every call said "No fal.ai key"
       (#923). Outside a project the tools now say that instead. Not checked with a real fal.ai key
       or API build
-- [x] An API-key build works alone: it shares the app's session, whose `attach` points at whichever
-      project started last, so another build beside it sent its files and asset spending to the
-      wrong project (`build.parallel` is 2 by default). Others wait their turn in the queue
-- [ ] Let API-key builds run side by side: give each an engine of its own, as a question has. This
-      also closes the gap left in working alone: the app and the `rebuild_start` tool each keep a
-      queue, so a build the in-app chat starts isn't kept apart from one the app started
+- [x] Each build has an engine of its own: sharing the app's session, whose `attach` points
+      at whichever project started last, sent a build's files and asset spending to the wrong project
+      (`build.parallel` is 2 by default). It takes on settings and project permissions from the
+      app before each tool call, and the asset keys are one copy all the engines share, so a key
+      saved or removed through any of them reaches the rest. Started while the app's session is
+      busy, it begins from the saved settings. It keeps the mode it started in, and agent-app builds
+      get one too, so no build's tools work in the app's session. Unit-tested; two real API-key
+      builds at once not run
+- [ ] A setting a builder changes with `settings_set` (Deep mode only) stays in its own engine and
+      file: the app's copy doesn't hear of it, and the app's next save can overwrite it
 - [ ] Check #369 live with Kimi K3 and a key limited to Kimi/Moonshot models (needs the person's
       OpenRouter key): that the build starts, or that the error now names the provider's reason
 - [ ] A live API-key build (needs a key on the test machine)

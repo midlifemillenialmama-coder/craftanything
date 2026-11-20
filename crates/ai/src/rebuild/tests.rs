@@ -1881,6 +1881,9 @@ mod picking_up_a_build {
         b.hub.set_asset_key("fal", "k-1").unwrap();
         let ws = Workspace::create(&b.projects, "x", "Build a notes app", TargetRef::None).unwrap();
         let _ = try_it(&b, &ws);
+        // The run loads them in its own engine; the app's takes them on at its next call.
+        assert!(b.hub.engine.asset_keys_loaded());
+        let _ = b.hub.engine.call("core_session_show", serde_json::Value::Null, CallOptions::new(Caller::Cli));
         let keys = b.hub.engine.session().ext.get::<craft_anything_engine::tools::asset_tools::AssetKeys>().unwrap_or_default();
         assert_eq!(keys.get("fal"), Some("k-1"));
     }
@@ -2902,6 +2905,53 @@ fn a_caught_bug_leaves_a_status_the_person_can_act_on() {
     // A finished run keeps the status the run itself set.
     let (ok, message, paused) = super::run_outcome(Ok(Ok("Ready.".into())), &mut ws);
     assert!(ok && !paused && message == "Ready.");
+}
+
+/// A key removed through one run's engine (`assets_key_remove` refreshes the session it holds)
+/// came back at the next call from the app's older copy, and a run beside it kept spending it
+/// (#943 review). The project hasn't turned on generated assets, so nothing is sent or spent.
+#[test]
+fn a_key_removed_through_a_run_stops_being_spent_by_every_run_and_the_app() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = Engine::shared(craft_anything_engine::testing::session(), Vec::new());
+    let worker = |name: &str| {
+        let ws = Workspace::create(dir.path(), name, "Make a game", TargetRef::None).unwrap();
+        let mut w = check_worker(&ws, false);
+        w.engine = app.for_a_run(craft_anything_engine::testing::session);
+        w.attach(&ws).unwrap();
+        (ws, w)
+    };
+    let ((_, mut a), (ws_b, mut b)) = (worker("a"), worker("b"));
+    let shown = app.session();
+    assert_eq!(shown.project.as_ref().unwrap().root, ws_b.investigation_dir(), "the app still shows the project");
+    // A run in the app's session beside them would post its questions to their inbox (#943 review).
+    assert!(shown.ext.get::<InboxDir>().is_none(), "their inbox stays theirs");
+    drop(shown);
+    // The app asks in a project of its own, as a run working in its session would.
+    let ws_c = Workspace::create(dir.path(), "c", "Make a game", TargetRef::None).unwrap();
+    app.session().ext.insert(Arc::new(InboxDir(ws_c.inbox_dir())));
+    let store = crate::KeyStore::file_only(dir.path().join("keys.toml"));
+    store.set(crate::keys::FAL_KEY, "k-1").unwrap();
+    a.load_asset_keys(&store);
+    b.load_asset_keys(&store);
+    assert!(a.assets && b.assets);
+    let call = |e: &Engine| e.call("assets_image_generate", json!({"prompt": "a crate", "save_as": "crate.png"}), CallOptions::new(Caller::Ui)).err().unwrap();
+    assert_eq!(call(&a.engine).code, ErrorCode::NoPermission, "past the key check");
+
+    store.delete(crate::keys::FAL_KEY).unwrap();
+    crate::keys::refresh_loaded(&mut a.engine.session(), &a.engine, &store);
+    // With no FAL_KEY in this test's environment the key is gone; with one, it stays set up.
+    if std::env::var_os("FAL_KEY").is_none() {
+        for (e, who) in [(&a.engine, "the run that removed it"), (&b.engine, "a run beside it"), (&app, "the app")] {
+            assert_eq!(call(e).code, ErrorCode::BadSettings, "{who} stops spending it, at its next call too");
+        }
+        assert_eq!(call(&a.engine).code, ErrorCode::BadSettings, "the app's older copy doesn't bring it back");
+    }
+
+    // A key saved in the app reaches the runs as well.
+    store.set(crate::keys::FAL_KEY, "k-2").unwrap();
+    crate::keys::refresh_loaded(&mut app.session(), &app, &store);
+    assert_eq!(call(&b.engine).code, ErrorCode::NoPermission);
 }
 
 /// #923: with OpenRouter as the builder, every asset call said "No fal.ai key" with one saved. The

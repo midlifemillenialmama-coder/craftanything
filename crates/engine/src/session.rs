@@ -105,6 +105,41 @@ impl Session {
         Session { settings, config_dir: Some(dir.to_path_buf()), ..Default::default() }
     }
 
+    /// A session for one piece of work beside this one ([`crate::Engine::for_a_run`]): the same
+    /// settings, plugins and asset providers, nothing open, and this session's mode, kept for the
+    /// whole run.
+    pub fn for_a_run(&self) -> Session {
+        let mut run = Session { config_dir: self.config_dir.clone(), deep_for_run: Some(!self.clean_room()), ..Default::default() };
+        run.follow(self);
+        run
+    }
+
+    /// A session for one piece of work from the saved settings, for when the session it works
+    /// beside is busy ([`crate::Engine::for_a_run`]); `config_dir` is where they were read from.
+    pub fn for_a_run_from(settings: Settings, config_dir: Option<std::path::PathBuf>, deep_for_run: Option<bool>) -> Session {
+        Session { settings, config_dir, deep_for_run, ..Default::default() }
+    }
+
+    /// Take on what the person changes in the app while this session works: settings and what
+    /// they've allowed for this project. Asset keys are shared by the engines themselves
+    /// ([`crate::Engine::load_asset_keys`]). Not the mode: a Clean room run that took on Deep mode
+    /// would read inside the original for a build recorded as Clean room.
+    pub fn follow(&mut self, app: &Session) {
+        use craft_anything_engines::assets::AssetProviders;
+        self.settings.clone_from(&app.settings);
+        if let Some(plugins) = app.ext.get::<crate::plugins::Plugins>() {
+            self.ext.insert(plugins);
+        }
+        if let Some(providers) = app.ext.get::<AssetProviders>() {
+            self.ext.insert(providers);
+        }
+        if let (Some(mine), Some(theirs)) = (self.project.as_mut(), app.project.as_ref())
+            && mine.root == theirs.root
+        {
+            mine.meta.allowed_tools.clone_from(&theirs.meta.allowed_tools);
+        }
+    }
+
     /// Keep a project started in a folder the person picked in the project list
     /// ([`Settings::remember_project`]), saving settings when that changed them.
     pub fn remember_project(&mut self, root: &std::path::Path) -> Result<(), craft_anything_evidence::ToolError> {

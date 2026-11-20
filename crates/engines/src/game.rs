@@ -527,6 +527,10 @@ pub struct Inventory {
     pub epic_launcher: Option<PathBuf>,
     /// A C++ compiler Unreal can use (Visual Studio, Xcode, or the selected Linux engine's bundled Clang).
     pub cpp_tools: bool,
+    /// Rust's installer, when it's on this computer without a selected toolchain: `cargo` only
+    /// exists once `rustup default` has picked one (#2252), so the setup must say that instead of
+    /// pointing at rustup.rs, whose installer refuses to run over an existing install.
+    pub rustup: Option<PathBuf>,
 }
 
 impl Inventory {
@@ -583,7 +587,8 @@ pub fn inventory(p: &Places) -> Inventory {
     engines.extend(unity_editors(p));
     engines.extend(unreal_installs(p));
     engines.extend(godot_installs(p));
-    if let Some(cargo) = p.use_path.then(|| craft_anything_platform::which("cargo")).flatten() {
+    let cargo = p.use_path.then(|| craft_anything_platform::which("cargo")).flatten();
+    if let Some(cargo) = cargo.clone() {
         engines.push(Installed { builder: Builder::Rust, version: String::new(), program: cargo });
     }
     engines.sort_by(|a, b| (a.builder as u8).cmp(&(b.builder as u8)).then_with(|| version_key(&b.version).cmp(&version_key(&a.version))));
@@ -603,6 +608,9 @@ pub fn inventory(p: &Places) -> Inventory {
                 .collect(),
         ),
         cpp_tools,
+        // Only when cargo is missing: with a toolchain selected, Rust is simply ready and the
+        // setup keeps today's step.
+        rustup: cargo.is_none().then(|| p.use_path.then(|| craft_anything_platform::which("rustup")).flatten()).flatten(),
     }
 }
 

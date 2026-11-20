@@ -415,6 +415,9 @@ fn engines_list(ctx: &mut Ctx<'_>, _params: Value) -> Result<ToolOutput, ToolErr
         "engines": engines,
         "deep_mode": {"enabled": s.deep_mode, "ghidra": s.ghidra_launcher().map(|p| p.display().to_string())},
         "game_engines": builders,
+        // Rust's installer without a selected toolchain (#2252): `cargo` is missing but the fix is
+        // `rustup default`, not the rustup.rs installer.
+        "rustup": inv.rustup.map(|p| p.display().to_string()),
     })))
 }
 

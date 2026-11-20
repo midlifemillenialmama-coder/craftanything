@@ -2213,6 +2213,12 @@ Gaps found while using the app for real projects.
       A maintainer's call, made by merging: Simple's larger text was there for people who find
       small text hard to read, and this leaves that to zoom
       — claimed: jgt87, branch feature/r2.9-one-size-both-modes — PR #1236
+- [x] Rust setup says what to do when rustup is on the computer without a selected toolchain
+      (Homebrew's rustup ships only `rustup`; `cargo` appears after `rustup default`), instead of
+      pointing at rustup.rs, whose installer refuses to run over an existing install (#2252): the
+      engine inventory finds rustup (and `engines_list` reports it), the Rust setup step and status
+      line say to run `rustup default stable`, and so does a new build's missing-cargo stop
+      — claimed: kaovilai, branch bugfix/rustup-toolchain-step
 
 ### R2.10 Pinned builds
 Owner: maintainers · Status: in progress

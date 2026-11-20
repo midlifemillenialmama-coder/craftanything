@@ -707,6 +707,8 @@ fn status_line(app: &mut CraftApp, ui: &mut Ui, b: Builder, offer: bool) {
             icons::show(ui, "download", theme::icon::MD, t.warning);
             let text = if b == Builder::Unreal && inv.best(b).is_some() {
                 tr(unreal_tools_missing(std::env::consts::OS))
+            } else if b == Builder::Rust && inv.rustup.is_some() {
+                tr("Rust's installer is on this computer. Run `rustup default stable` in a terminal to finish setting it up.")
             } else {
                 format!("{} {}", trf("{name} isn't on this computer yet.", &[("name", b.name())]), tr(b.needs()))
             };
@@ -746,7 +748,19 @@ fn steps(app: &CraftApp, b: Builder, inv: &Inventory) -> Vec<Step> {
             Some(Action::Download),
         )],
         Builder::Rust => {
-            vec![step("Install Rust", "Follow the steps on rustup.rs, then come back here.", inv.ready(b), Some(Action::OpenPage(game::download_page(b))))]
+            if inv.rustup.is_some() && !inv.ready(b) {
+                // rustup is already installed (often by Homebrew) without a default toolchain: its own
+                // installer refuses to run over an existing install (#2252), so the step says what to
+                // run instead of pointing at rustup.rs.
+                vec![step(
+                    "Set up the Rust toolchain",
+                    "rustup is on this computer. Run `rustup default stable` in a terminal, then come back here.",
+                    inv.ready(b),
+                    None,
+                )]
+            } else {
+                vec![step("Install Rust", "Follow the steps on rustup.rs, then come back here.", inv.ready(b), Some(Action::OpenPage(game::download_page(b))))]
+            }
         }
         Builder::Unity => {
             let hub = inv.unity_hub.clone();
@@ -828,7 +842,13 @@ pub fn modal(app: &mut CraftApp, ui: &mut Ui, b: Builder, close: &mut bool) {
         ui.vertical(|ui| {
             let title = if ready { trf("{name} is ready", &[("name", b.name())]) } else { trf("Get {name}", &[("name", b.name())]) };
             ui.label(theme::heading(title, theme::SECTION));
-            ui.label(RichText::new(tr(b.needs())).color(t.text_dim));
+            let subtitle = if b == Builder::Rust && inv.rustup.is_some() {
+                // #2252: rustup is there without a toolchain — the steps below say how to finish.
+                tr("Rust's installer is on this computer. Run `rustup default stable` in a terminal to finish setting it up.")
+            } else {
+                tr(b.needs())
+            };
+            ui.label(RichText::new(subtitle).color(t.text_dim));
         });
     });
     ui.add_space(theme::space::LG);
@@ -1014,6 +1034,36 @@ mod tests {
         assert_eq!(win_title, "Add Visual Studio's C++ tools");
         assert_eq!(win_page, Some(game::VISUAL_STUDIO_PAGE));
         assert!(unreal_tools_missing("windows").contains("Visual Studio"));
+    }
+
+    #[test]
+    fn rustup_without_a_toolchain_says_rustup_default_not_the_installer() {
+        use crate::demo;
+        use craft_anything_engine::Mode;
+        let app = demo::app(demo::engine(Mode::Beginner, true));
+        let rustup = Inventory { rustup: Some(PathBuf::from("/opt/homebrew/bin/rustup")), ..Default::default() };
+        let step = &steps(&app, Builder::Rust, &rustup)[0];
+        assert!(!step.done, "no cargo, so Rust isn't ready");
+        assert_eq!(step.title, "Set up the Rust toolchain");
+        assert!(step.detail.contains("rustup default stable"), "the step says what to run: {}", step.detail);
+        assert!(step.action.is_none(), "no download page: rustup.rs's installer refuses to run over an existing install");
+
+        let fresh = &steps(&app, Builder::Rust, &Inventory::default())[0];
+        assert_eq!(fresh.title, "Install Rust");
+        assert!(fresh.detail.contains("rustup.rs"));
+        assert!(matches!(fresh.action, Some(Action::OpenPage(_))), "without rustup, the step points at rustup.rs");
+
+        // A machine with a selected toolchain keeps today's step, however its inventory was made.
+        use craft_anything_engines::game::Installed;
+        let ready = Inventory {
+            engines: vec![Installed { builder: Builder::Rust, version: String::new(), program: "cargo".into() }],
+            rustup: Some(PathBuf::from("/opt/homebrew/bin/rustup")),
+            ..Default::default()
+        };
+        let step = &steps(&app, Builder::Rust, &ready)[0];
+        assert!(step.done, "cargo is there, so Rust is ready");
+        assert_eq!(step.title, "Install Rust");
+        assert!(matches!(step.action, Some(Action::OpenPage(_))), "a ready machine isn't told to set up a toolchain");
     }
 
     #[test]

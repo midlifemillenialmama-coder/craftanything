@@ -31,10 +31,124 @@ fn main() {
     if let Some(error) = &plan.error {
         println!("cargo::error={error}");
     }
-    let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap_or_default()).join("craft_fonts.rs");
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").unwrap_or_default());
+    let out = out_dir.join("craft_fonts.rs");
     if let Err(e) = std::fs::write(&out, &plan.source) {
         println!("cargo::error=writing {}: {e}", out.display());
     }
+    join_catalogs(&PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default()).join("src/i18n"), &out_dir.join("i18n"));
+}
+
+/// Joins each language's catalog files (`src/i18n/<code>/*.tsv`, in name order) into
+/// `<out>/<code>.tsv`, which `i18n.rs` embeds. A PR adds its strings in a file of its own, so two
+/// PRs that add strings don't touch the same lines (#1465).
+///
+/// The returned lines are also printed as `cargo::error`, so they fail the build: a key shared by
+/// two files of one language ([`join_files`]), or a `.tsv` left beside the language folders.
+pub fn join_catalogs(src: &Path, out: &Path) -> Vec<String> {
+    println!("cargo::rerun-if-changed={}", src.display());
+    let paths = match entries(src) {
+        Ok(paths) => paths,
+        Err(e) => {
+            let msg = format!("reading {}: {e}", src.display());
+            println!("cargo::error={msg}");
+            return vec![msg];
+        }
+    };
+    let mut problems = Vec::new();
+    let mut dirs = Vec::new();
+    for path in paths {
+        if path.is_dir() {
+            dirs.push(path);
+        } else if path.is_file() && path.extension().is_some_and(|ext| ext == "tsv") {
+            // The old layout was one `i18n/<code>.tsv`. Leaving it there would hide it from the join.
+            let msg = format!("{} sits beside the language folders; move it into a language folder", path.display());
+            println!("cargo::error={msg}");
+            problems.push(msg);
+        }
+    }
+    // Start from nothing, so a language whose folder was removed doesn't keep its old catalog.
+    if let Err(e) = std::fs::remove_dir_all(out).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }) {
+        let msg = format!("clearing {}: {e}", out.display());
+        println!("cargo::error={msg}");
+        problems.push(msg);
+        return problems;
+    }
+    if let Err(e) = std::fs::create_dir_all(out) {
+        let msg = format!("making {}: {e}", out.display());
+        println!("cargo::error={msg}");
+        problems.push(msg);
+        return problems;
+    }
+    for dir in dirs {
+        let files = match entries(&dir) {
+            Ok(paths) => paths.into_iter().filter(|p| p.extension().is_some_and(|x| x == "tsv")),
+            Err(e) => {
+                let msg = format!("reading {}: {e}", dir.display());
+                println!("cargo::error={msg}");
+                problems.push(msg);
+                continue;
+            }
+        };
+        let files: Vec<PathBuf> = files.collect();
+        for file in &files {
+            // The folder's scan sees a new or changed file; a listed file that's gone sees a removal.
+            println!("cargo::rerun-if-changed={}", file.display());
+        }
+        let joined = match join_files(&files) {
+            Ok(joined) => joined,
+            Err(found) => {
+                for p in found {
+                    println!("cargo::error={p}");
+                    problems.push(p);
+                }
+                continue;
+            }
+        };
+        let Some(code) = dir.file_name() else { continue };
+        let target = out.join(code).with_extension("tsv");
+        if let Err(e) = std::fs::write(&target, joined) {
+            let msg = format!("writing {}: {e}", target.display());
+            println!("cargo::error={msg}");
+            problems.push(msg);
+        }
+    }
+    problems
+}
+
+/// One language's catalog files joined in the order given, or what's wrong: a file that can't be
+/// read, or a key (the text before the first tab) that two lines carry, which would leave one
+/// translation unused depending on which file sorts last.
+pub fn join_files(files: &[PathBuf]) -> Result<String, Vec<String>> {
+    let (mut joined, mut problems) = (String::new(), Vec::new());
+    let mut seen: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+    for file in files {
+        let text = match std::fs::read_to_string(file) {
+            Ok(text) => text,
+            Err(e) => {
+                problems.push(format!("reading {}: {e}", file.display()));
+                continue;
+            }
+        };
+        for line in text.lines().filter(|l| !l.trim_start().starts_with('#')) {
+            let Some((key, _)) = line.split_once('\t').filter(|(k, _)| !k.is_empty()) else { continue };
+            if let Some(first) = seen.insert(key.to_string(), file.clone()) {
+                problems.push(format!("{key:?} is in both {} and {}", first.display(), file.display()));
+            }
+        }
+        joined.push_str(&text);
+        if !text.ends_with('\n') {
+            joined.push('\n');
+        }
+    }
+    if problems.is_empty() { Ok(joined) } else { Err(problems) }
+}
+
+/// A folder's entries in name order; an entry that can't be read is an error, not a gap.
+fn entries(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut paths = std::fs::read_dir(dir)?.map(|e| e.map(|e| e.path())).collect::<std::io::Result<Vec<_>>>()?;
+    paths.sort();
+    Ok(paths)
 }
 
 /// What a build does about craft-fonts, decided from its inputs alone.

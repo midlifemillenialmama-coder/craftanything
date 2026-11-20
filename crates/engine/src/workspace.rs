@@ -81,10 +81,11 @@ fn copy_tree(from: &Path, to: &Path, skip: &dyn Fn(&Path) -> bool, depth: usize)
 }
 
 /// The current `craft.json` format version. Bumping it means appending a step to [`MANIFEST_STEPS`].
-pub const MANIFEST_VERSION: u32 = 5;
+pub const MANIFEST_VERSION: u32 = 6;
 
 /// The steps that bring an older `craft.json` forward; step `i` goes from version `i` to `i + 1`.
-const MANIFEST_STEPS: &[versioned::Step<Value>] = &[manifest_v0_to_v1, manifest_v1_to_v2, manifest_v2_to_v3, manifest_v3_to_v4, manifest_v4_to_v5];
+const MANIFEST_STEPS: &[versioned::Step<Value>] =
+    &[manifest_v0_to_v1, manifest_v1_to_v2, manifest_v2_to_v3, manifest_v3_to_v4, manifest_v4_to_v5, manifest_v5_to_v6];
 const _: () = assert!(MANIFEST_STEPS.len() == MANIFEST_VERSION as usize, "one step per craft.json version");
 
 /// Version 0 (no `version` field) has the same shape as version 1; only the number is new.
@@ -127,6 +128,13 @@ fn manifest_v4_to_v5(doc: &mut Value) -> Result<(), String> {
         obj.insert("capture_deep".into(), Value::Bool(true));
     }
     Ok(())
+}
+
+/// Version 6 adds the toolchain the last finished build used (`build_toolchain`). A version-5
+/// manifest predates it; the field is optional and a check derives the toolchain from the files
+/// until a build records one.
+fn manifest_v5_to_v6(doc: &mut Value) -> Result<(), String> {
+    if doc.is_object() { Ok(()) } else { Err("the manifest isn't a JSON object".into()) }
 }
 
 /// Read a `craft.json` document of any version this build understands. A newer manifest is read
@@ -402,6 +410,10 @@ pub struct Manifest {
     /// The stack chosen for the build ("React + TypeScript (Vite)", "Rust + Bevy"…).
     #[serde(default)]
     pub stack: String,
+    /// The toolchain the last finished build used ("Python", "Rust"…), also when it is the one
+    /// the recorded stack names; the build check uses it. None until a build records one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_toolchain: Option<String>,
     #[serde(default)]
     pub status: Status,
     /// One line on what's happening or what went wrong.
@@ -496,6 +508,7 @@ impl Manifest {
             request: request.trim().to_string(),
             target,
             stack: String::new(),
+            build_toolchain: None,
             status: Status::New,
             note: String::new(),
             created_ms: now,
@@ -792,6 +805,7 @@ impl Workspace {
             }
         }
         copy.manifest.stack.clone_from(&m.stack);
+        copy.manifest.build_toolchain.clone_from(&m.build_toolchain);
         copy.manifest.checks.clone_from(&m.checks);
         copy.manifest.last_reply.clone_from(&m.last_reply);
         // Ready stays ready; anything else can carry on (with a new conversation).
@@ -2053,6 +2067,24 @@ mod tests {
         ws.save().unwrap();
         let saved: Value = serde_json::from_slice(&std::fs::read(dir.path().join(MANIFEST)).unwrap()).unwrap();
         assert_eq!(saved["capture_deep"], false);
+    }
+
+    /// R2.9: version 5 predates the toolchain the last build used; it migrates with none recorded,
+    /// and a recorded one is kept and saved.
+    #[test]
+    fn a_version_5_manifest_gains_no_build_toolchain_until_a_build_records_one() {
+        let v5 = br#"{"version":5,"name":"P","request":"x","target":{"kind":"none"},"stack":"Python","created_ms":1,"updated_ms":1}"#;
+        let m = read_manifest(v5).unwrap();
+        assert_eq!((m.version, m.build_toolchain.as_deref()), (MANIFEST_VERSION, None));
+        let recorded =
+            br#"{"version":6,"name":"P","request":"x","target":{"kind":"none"},"stack":"Python","build_toolchain":"Python","created_ms":1,"updated_ms":1}"#;
+        assert_eq!(read_manifest(recorded).unwrap().build_toolchain.as_deref(), Some("Python"));
+        let d = tempfile::tempdir().unwrap();
+        let mut ws = Workspace::create(d.path(), "P", "x", TargetRef::None).unwrap();
+        ws.manifest.build_toolchain = Some("Python".into());
+        ws.save().unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(ws.root.join(MANIFEST)).unwrap()).unwrap();
+        assert_eq!((saved["version"].as_u64(), saved["build_toolchain"].as_str()), (Some(MANIFEST_VERSION as u64), Some("Python")));
     }
 
     /// Read a literal `craft.json` sample, check both modes and the saved document.

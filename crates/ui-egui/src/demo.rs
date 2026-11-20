@@ -224,6 +224,7 @@ fn workspace(slug: &str, name: &str, request: &str, target: TargetRef, status: S
             request: request.into(),
             target,
             stack: "React + TypeScript (Vite)".into(),
+            build_toolchain: None,
             status,
             note: String::new(),
             created_ms: at,

@@ -13,7 +13,8 @@ impl Check for OwnBuildCheck {
     }
 
     fn run(&self, cx: &mut CheckCx) -> Result<CheckResult, ToolError> {
-        let (passed, note) = own_build_check(&cx.ws.app_dir(), cx.ws.app_place(), &cx.ws.manifest.stack, cx.editor(), &cx.stop());
+        let (passed, note) =
+            own_build_check(&cx.ws.app_dir(), cx.ws.app_place(), &cx.ws.manifest.stack, cx.ws.manifest.build_toolchain.as_deref(), cx.editor(), &cx.stop());
         Ok(CheckResult::new(self.id(), cx.round, passed, note))
     }
 }
@@ -31,7 +32,8 @@ impl Check for OwnTestsCheck {
 
     fn run(&self, cx: &mut CheckCx) -> Result<CheckResult, ToolError> {
         let app = cx.ws.app_dir();
-        let (passed, note) = own_tests_check(&app, stacks::toolchain_in(&app), &cx.stop());
+        let tool = stacks::toolchain_for_build(&app, &cx.ws.manifest.stack, cx.ws.manifest.build_toolchain.as_deref());
+        let (passed, note) = own_tests_check(&app, tool, &cx.stop());
         Ok(CheckResult::new(self.id(), cx.round, passed, note))
     }
 }

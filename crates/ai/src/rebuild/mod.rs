@@ -856,12 +856,18 @@ impl Worker {
         self.self_check = Some((kind.clone(), opts.good_enough));
         let kind = kind.as_ref();
         self.editor = self.find_editor(&ws.manifest.stack)?;
-        // A new build whose stack's program is missing would learn so only at its first check,
-        // after a whole turn (#1837). A project already in app/ isn't stopped: the person may
-        // have moved it to another stack, which the recorded one doesn't show. An API builder over
-        // SSH builds here, so only a coding agent on the other computer skips it.
-        if !study::tools_run_remotely(remote, api.is_some()) && stacks::toolchain_in(&ws.app_dir()).is_none() {
-            missing_program_stop(&ws.manifest.stack, |p| craft_anything_platform::which(p).is_some())?;
+        // A build whose toolchain's program is missing would learn so only at its first check,
+        // after a whole turn (#1837). A detected toolchain comes first; an empty project falls
+        // back to the stack's toolchain, then to the stack's own program. An API builder over SSH
+        // builds here, so only a coding agent on the other computer skips it.
+        let engine = game::Builder::from_stack(&ws.manifest.stack);
+        if !study::tools_run_remotely(remote, api.is_some()) && (engine.is_none() || engine == Some(game::Builder::Rust)) {
+            let app = ws.app_dir();
+            if let Some(tool) = preflight_toolchain(&app, &ws.manifest.stack, ws.manifest.build_toolchain.as_deref()) {
+                missing_toolchain_program_stop(tool, &app, |p| craft_anything_platform::which(p).is_some())?;
+            } else {
+                missing_program_stop(&ws.manifest.stack, |p| craft_anything_platform::which(p).is_some())?;
+            }
         }
         let api_resumed = api.as_ref().is_some_and(crate::agent::ApiConversation::resumed);
         let kept = KeptHistory { in_mode: kept_without_api.in_mode || api_resumed, elsewhere: kept_without_api.elsewhere };
@@ -1012,14 +1018,11 @@ impl Worker {
                 if !reply.trim().is_empty() {
                     ws.manifest.last_reply = reply.trim().to_string();
                 }
-                // The stack is recorded as the one the build uses, once it shows: left to the builder,
-                // or another than the default because the request asked for it. A game engine stays
-                // (it says the project is a game, and its editor is found for it).
-                if game::Builder::from_stack(&ws.manifest.stack).is_none()
-                    && let Some(s) = stacks::used_in(&ws.app_dir())
-                {
-                    ws.manifest.stack = s.name.clone();
-                }
+                // One rule records the stack and toolchain the build used: a non-game stack whose
+                // dependencies name another gives way, a stack whose toolchain is gone gives way
+                // to the one whose files are here, and the toolchain is always recorded.
+                let app = ws.app_dir();
+                stacks::record_after_build(&mut ws.manifest, &app);
                 ws.manifest.awaiting_check = true;
                 ws.save()?;
                 // Keep the finished turn before scanning: a cancellation during the scan
@@ -1667,6 +1670,30 @@ pub fn builder_backend(cfg: &crate::AiConfig, named: Option<&str>) -> Result<cra
 fn missing_program_stop(stack: &str, have: impl Fn(&str) -> bool) -> Result<(), ToolError> {
     let Some((program, from)) = stacks::missing_program(stack, have) else { return Ok(()) };
     Err(ToolError::new(ErrorCode::BadSettings, format!("{stack} is built with {program}, which isn't on this computer.")).with_remediation(format!(
+        "{from}, then try again; or start the project again with another stack (\"Build with\" in the app, --build-with in the CLI)."
+    )))
+}
+
+/// The toolchain whose program a build's first check will need before the builder starts: the
+/// same source-backed selection the check uses (recorded, stack, detected, marker fallback),
+/// then the stack's own toolchain for an empty project. None leaves the stack-level fallback.
+fn preflight_toolchain(app: &Path, stack: &str, build_toolchain: Option<&str>) -> Option<&'static stacks::Toolchain> {
+    stacks::toolchain_for_build(app, stack, build_toolchain).or_else(|| stacks::toolchain_for(stack))
+}
+
+/// Stops a build whose toolchain's program this computer doesn't have: the program the check will
+/// run, after the toolchain's own interpreter and Windows name are resolved, so a stack whose row
+/// names no program (Python) is still checked. `have` is the lookup, injected for tests.
+fn missing_toolchain_program_stop(tool: &stacks::Toolchain, app: &Path, have: impl Fn(&str) -> bool) -> Result<(), ToolError> {
+    let command = if tool.generated_build.is_empty() { &tool.build } else { &tool.generated_build };
+    let Some((program, _)) = tool.command(app, command) else { return Ok(()) };
+    let name = program.to_string_lossy();
+    let here = if program.is_absolute() { program.is_file() } else { have(name.as_ref()) };
+    if here {
+        return Ok(());
+    }
+    let from = tool.program_from.as_deref().unwrap_or("Install it");
+    Err(ToolError::new(ErrorCode::BadSettings, format!("{} is built with {}, which isn't on this computer.", tool.name, name)).with_remediation(format!(
         "{from}, then try again; or start the project again with another stack (\"Build with\" in the app, --build-with in the CLI)."
     )))
 }

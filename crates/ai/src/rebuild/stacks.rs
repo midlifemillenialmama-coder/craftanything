@@ -3,6 +3,9 @@
 //! to build with it. The table also lists libraries asked for on top of a stack (shadcn/ui,
 //! Tailwind CSS), whose steps are added to the stack's.
 
+use craft_anything_engine::toolchains::{self, SourceScan};
+use craft_anything_engine::workspace::Manifest;
+use craft_anything_engines::game;
 use std::sync::OnceLock;
 
 /// One stack ("React + TypeScript (Vite)", "Unity"…).
@@ -40,9 +43,12 @@ pub struct Stack {
     pub program: Option<String>,
     #[serde(default)]
     pub program_from: Option<String>,
+    /// The `[[toolchain]]` row that builds it (`Rust`, `Python`, `Node.js`…), if one names it.
+    #[serde(default)]
+    pub toolchain: Option<String>,
 }
 
-pub use craft_anything_engine::toolchains::{Toolchain, found_in as toolchain_in};
+pub use craft_anything_engine::toolchains::{Toolchain, built_in, found_in as toolchain_in};
 
 /// The stack that leaves the choice to the builder (a website's default); [`used_in`] then
 /// records the one it used.
@@ -115,8 +121,16 @@ pub fn asked_for(words: &str) -> Option<&'static Stack> {
     catalogue().iter().find(|s| s.asked_by.iter().any(|p| words.contains(p.as_str())))
 }
 
+/// The dependencies a folder's package.json and Cargo.toml name, for every rule that reads them.
+fn dependencies(dir: &std::path::Path) -> Vec<String> {
+    let mut deps = craft_anything_engine::outputs::npm_dependencies(dir);
+    deps.extend(craft_anything_engine::outputs::cargo_dependencies(dir));
+    deps
+}
+
 /// The stack a build in `app` uses, from its package.json dependencies (the first stack in table
-/// order whose `uses` it lists); None when it has none or names no stack in the table.
+/// order whose `uses` it lists); None when it has none or names no stack. Cargo.toml doesn't
+/// replace a stack the request named; the toolchain rule covers a build that moved language.
 pub fn used_in(app: &std::path::Path) -> Option<&'static Stack> {
     let deps = craft_anything_engine::outputs::npm_dependencies(app);
     catalogue().iter().find(|s| s.uses.iter().any(|d| deps.contains(d)))
@@ -126,8 +140,7 @@ pub fn used_in(app: &std::path::Path) -> Option<&'static Stack> {
 /// most, then the dependencies, then the other files that name a stack. None when nothing does.
 pub fn found_in(dir: &std::path::Path) -> Option<&'static Stack> {
     let by_file = |engine: bool| catalogue().iter().filter(|s| s.engine.is_some() == engine).find(|s| s.found_by.iter().any(|f| has_file(dir, f)));
-    let mut deps = craft_anything_engine::outputs::npm_dependencies(dir);
-    deps.extend(craft_anything_engine::outputs::cargo_dependencies(dir));
+    let deps = dependencies(dir);
     let by_deps = || catalogue().iter().find(|s| s.uses.iter().any(|d| deps.contains(d)) && s.needs.iter().all(|d| deps.contains(d)));
     by_file(true).or_else(by_deps).or_else(|| by_file(false))
 }
@@ -136,6 +149,99 @@ fn has_file(dir: &std::path::Path, name: &str) -> bool {
     match name.strip_prefix('*') {
         Some(ending) => std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| e.file_name().to_string_lossy().ends_with(ending)),
         None => dir.join(name).is_file(),
+    }
+}
+
+/// The toolchain that builds `stack`, when the table names one.
+pub fn toolchain_for(stack: &str) -> Option<&'static Toolchain> {
+    craft_anything_engine::toolchains::get(get(stack)?.toolchain.as_deref()?)
+}
+
+/// The stack to record for `toolchain` that was built in `app`: the first stack with that
+/// toolchain whose declared dependencies or files are here, then the toolchain's own
+/// `default_stack` from the table. None for a toolchain with neither (Go, .NET, Maven, Gradle,
+/// Make): the recorded toolchain still tells the check. It searches every stack rather than taking
+/// the first stack from either dependency file, so a stale package.json can't hide a matching
+/// Cargo dependency.
+pub fn stack_for_toolchain(toolchain: &str, app: &std::path::Path) -> Option<&'static Stack> {
+    let deps = dependencies(app);
+    catalogue()
+        .iter()
+        .find(|s| s.toolchain.as_deref() == Some(toolchain) && s.uses.iter().any(|d| deps.contains(d)) && s.needs.iter().all(|d| deps.contains(d)))
+        .or_else(|| catalogue().iter().find(|s| s.toolchain.as_deref() == Some(toolchain) && s.found_by.iter().any(|f| has_file(app, f))))
+        .or_else(|| craft_anything_engine::toolchains::get(toolchain).and_then(|t| t.default_stack.as_deref()).and_then(get))
+}
+
+/// The toolchain to build or test `app` with, in precedence order: the recorded build toolchain
+/// when its files are here, the recorded stack's toolchain when its files are here, the first
+/// source-backed toolchain, then the marker-only fallback for a project whose sources aren't
+/// written yet. Shared by the build and own-tests checks so they agree.
+pub fn toolchain_for_build(app: &std::path::Path, stack: &str, build_toolchain: Option<&str>) -> Option<&'static Toolchain> {
+    // An incomplete scan can't prove the recorded toolchain is gone, so it keeps it, exactly as
+    // record_after_build does. A completed scan with no sources falls through.
+    if let Some(tool) = build_toolchain.and_then(toolchains::get) {
+        match toolchains::built_in_named_scan(app, &tool.name) {
+            SourceScan::Found | SourceScan::Unknown => return Some(tool),
+            SourceScan::None => {}
+        }
+    }
+    if let Some(tool) = toolchain_for(stack) {
+        match toolchains::built_in_named_scan(app, &tool.name) {
+            SourceScan::Found | SourceScan::Unknown => return Some(tool),
+            SourceScan::None => {}
+        }
+    }
+    built_in(app).or_else(|| toolchain_in(app))
+}
+
+/// Record the stack and toolchain a finished build actually used, by one rule: a non-game stack
+/// whose dependencies name another stack gives way; a recorded toolchain whose markers and sources
+/// are still here is kept, even when both it and another toolchain have source trees; only when
+/// the recorded toolchain is absent or invalid does the stack's toolchain, then detection, choose
+/// one. An incomplete source scan keeps the recorded choice instead of replacing it. Game engines
+/// keep their stack; Rust's game default may change.
+pub fn record_after_build(manifest: &mut Manifest, app: &std::path::Path) {
+    let mut engine = game::Builder::from_stack(&manifest.stack);
+    if engine.is_none()
+        && let Some(s) = used_in(app)
+    {
+        manifest.stack = s.name.clone();
+        engine = game::Builder::from_stack(&manifest.stack);
+    }
+    let toolchain_here = engine.is_none() || engine == Some(game::Builder::Rust);
+    if !toolchain_here {
+        manifest.build_toolchain = None;
+        return;
+    }
+    // Keep what the last finished turn used while its files are still here. An incomplete scan
+    // can't prove they're gone, so it keeps the recorded toolchain too.
+    if let Some(tool) = manifest.build_toolchain.as_deref().and_then(toolchains::get) {
+        match toolchains::built_in_named_scan(app, &tool.name) {
+            SourceScan::Found | SourceScan::Unknown => return,
+            SourceScan::None => manifest.build_toolchain = None,
+        }
+    }
+    // The recorded toolchain is absent or invalid: use the recorded stack's toolchain when it is
+    // here. An incomplete scan is not evidence that it isn't.
+    if let Some(tool) = toolchain_for(&manifest.stack) {
+        match toolchains::built_in_named_scan(app, &tool.name) {
+            SourceScan::Found => {
+                manifest.build_toolchain = Some(tool.name.clone());
+                return;
+            }
+            SourceScan::Unknown => return,
+            SourceScan::None => {}
+        }
+    }
+    // Nothing recorded or named by the stack can be built: detect the first source-backed
+    // toolchain and record the stack that matches it.
+    if let Some(tool) = built_in(app) {
+        manifest.build_toolchain = Some(tool.name.clone());
+        if let Some(s) = stack_for_toolchain(&tool.name, app) {
+            manifest.stack = s.name.clone();
+        }
+    } else {
+        manifest.build_toolchain = None;
     }
 }
 
@@ -236,12 +342,231 @@ mod tests {
         for b in craft_anything_engines::game::Builder::ALL {
             assert!(get(b.stack()).is_some(), "no stack in stacks.toml for {}", b.stack());
         }
+        for s in catalogue() {
+            if let Some(t) = &s.toolchain {
+                assert!(craft_anything_engine::toolchains::get(t).is_some(), "{} names unknown toolchain {t}", s.name);
+            }
+        }
         assert_eq!(get("Unity").and_then(|s| s.engine.as_deref()), Some("unity"));
         assert!(parse("[[stack]]\nname = 3").is_err(), "a broken table is an error, not a panic");
         for l in &table().library {
             assert!(!l.steps.is_empty() && !l.asked_by.is_empty(), "{l:?}");
             assert!(l.stacks.iter().all(|s| get(s).is_some()), "{} names a stack that isn't in the table", l.name);
         }
+    }
+
+    /// R2.9: a marker with no source of its own doesn't count as built; another language's
+    /// sources do, so a stale Cargo.toml gives way to a Python entrypoint.
+    #[test]
+    fn a_folder_is_built_with_a_toolchain_only_when_its_sources_are_there() {
+        let built = |files: &[(&str, &str)]| {
+            let d = tempfile::tempdir().unwrap();
+            for (name, text) in files {
+                let p = d.path().join(name);
+                if let Some(parent) = p.parent() {
+                    std::fs::create_dir_all(parent).unwrap();
+                }
+                std::fs::write(p, text).unwrap();
+            }
+            built_in(d.path()).map(|t| t.name.as_str())
+        };
+        assert_eq!(built(&[("Cargo.toml", "")]), None, "a manifest without sources isn't built");
+        assert_eq!(built(&[("Cargo.toml", ""), ("src/main.rs", "")]), Some("Rust"));
+        assert_eq!(built(&[("Cargo.toml", ""), ("src/bin/cli.rs", "")]), Some("Rust"), "src/bin is Rust source, not output");
+        assert_eq!(built(&[("Cargo.toml", ""), ("main.py", "")]), Some("Python"), "a stale Cargo.toml gives way to Python");
+        assert_eq!(built(&[("package.json", ""), ("index.ts", "")]), Some("Node.js"));
+        assert_eq!(built(&[("pyproject.toml", ""), ("app.py", "")]), Some("Python"));
+        assert_eq!(built(&[("go.mod", ""), ("main.go", "")]), Some("Go"));
+        assert_eq!(built(&[("App.csproj", ""), ("Program.cs", "")]), Some(".NET"));
+        assert_eq!(built(&[("App.csproj", ""), ("bin/Generated.cs", "")]), None, ".NET build output isn't source");
+        assert_eq!(built(&[("pom.xml", ""), ("src/Main.java", "")]), Some("Maven"));
+        assert_eq!(built(&[("build.gradle", ""), ("src/main/groovy/App.groovy", "")]), Some("Gradle"), "Groovy is Gradle source");
+        assert_eq!(
+            built(&[("build.gradle", ""), ("main.py", ""), ("build/generated/Old.groovy", "")]),
+            Some("Python"),
+            "a Gradle build folder is output, not source"
+        );
+        assert_eq!(built(&[("build.gradle", ""), ("build/generated/Old.groovy", "")]), None, "Gradle output alone isn't a project");
+        assert_eq!(built(&[("Makefile", "")]), Some("Make"));
+        assert_eq!(built(&[("main.py", "")]), Some("Python"), "a root entrypoint alone");
+        assert_eq!(built(&[("notes.md", "")]), None);
+
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("Cargo.toml"), "").unwrap();
+        assert!(!craft_anything_engine::toolchains::built_in_named(d.path(), "Rust"), "no sources, no build");
+        std::fs::create_dir_all(d.path().join("src")).unwrap();
+        std::fs::write(d.path().join("src/main.rs"), "").unwrap();
+        assert!(craft_anything_engine::toolchains::built_in_named(d.path(), "Rust"));
+    }
+
+    #[test]
+    fn stacks_name_the_toolchain_that_builds_them() {
+        assert_eq!(toolchain_for("Python").map(|t| t.name.as_str()), Some("Python"));
+        assert_eq!(toolchain_for("Rust + egui (eframe)").map(|t| t.name.as_str()), Some("Rust"));
+        assert_eq!(toolchain_for("React + TypeScript (Vite)").map(|t| t.name.as_str()), Some("Node.js"));
+        assert_eq!(toolchain_for("Unity"), None);
+        for t in craft_anything_engine::toolchains::catalogue() {
+            if let Some(stack) = &t.default_stack {
+                assert!(get(stack).is_some(), "{} names unknown default stack {stack}", t.name);
+            }
+        }
+    }
+
+    /// A stack's `needs` are part of its identity: a package that lists `vite` without `react`
+    /// isn't the React stack, so it records no stack rather than the wrong one.
+    #[test]
+    fn a_stack_that_needs_another_dependency_does_not_match_without_it() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("package.json"), r#"{"dependencies": {"vite": "6"}}"#).unwrap();
+        assert_eq!(stack_for_toolchain("Node.js", d.path()), None, "vite without react isn't the React stack");
+        std::fs::write(d.path().join("package.json"), r#"{"dependencies": {"vite": "6", "react": "19"}}"#).unwrap();
+        assert_eq!(stack_for_toolchain("Node.js", d.path()).map(|s| s.name.as_str()), Some("React + TypeScript (Vite)"));
+    }
+
+    /// The toolchain is recorded even when it is the one the stack names: the check then uses the
+    /// same toolchain the build used instead of deriving it again.
+    #[test]
+    fn a_finished_build_records_the_toolchain_even_when_the_stack_names_it() {
+        let d = tempfile::tempdir().unwrap();
+        let mut ws = craft_anything_engine::workspace::Workspace::create(d.path(), "P", "x", craft_anything_engine::workspace::TargetRef::None).unwrap();
+        std::fs::create_dir_all(ws.app_dir()).unwrap();
+        std::fs::write(ws.app_dir().join("main.py"), "").unwrap();
+        ws.manifest.stack = "Python".into();
+        let app = ws.app_dir();
+        record_after_build(&mut ws.manifest, &app);
+        assert_eq!(ws.manifest.build_toolchain.as_deref(), Some("Python"));
+        assert_eq!(ws.manifest.stack, "Python");
+    }
+
+    /// A turn that changed nothing keeps the toolchain the last finished build used, even when
+    /// the folder also has another language's complete source tree to detect.
+    #[test]
+    fn an_unchanged_turn_keeps_the_recorded_toolchain_when_both_source_trees_are_here() {
+        let d = tempfile::tempdir().unwrap();
+        let mut ws = craft_anything_engine::workspace::Workspace::create(d.path(), "P", "x", craft_anything_engine::workspace::TargetRef::None).unwrap();
+        std::fs::create_dir_all(ws.app_dir().join("src")).unwrap();
+        std::fs::write(ws.app_dir().join("main.py"), "").unwrap();
+        std::fs::write(ws.app_dir().join("Cargo.toml"), "[dependencies]\neframe = \"0.30\"\n").unwrap();
+        std::fs::write(ws.app_dir().join("src/main.rs"), "").unwrap();
+        ws.manifest.stack = "Rust + egui (eframe)".into();
+        ws.manifest.build_toolchain = Some("Python".into());
+        let app = ws.app_dir();
+        record_after_build(&mut ws.manifest, &app);
+        assert_eq!(ws.manifest.build_toolchain.as_deref(), Some("Python"), "the recorded toolchain's files are still here");
+        assert_eq!(ws.manifest.stack, "Rust + egui (eframe)", "an unchanged turn keeps the recorded stack");
+    }
+
+    /// The build selection and the recorder share one contract: an unknown scan keeps the
+    /// recorded toolchain, even when another language's source tree is readable.
+    #[cfg(unix)]
+    #[test]
+    fn build_selection_keeps_recorded_python_when_its_scan_is_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let mut ws = craft_anything_engine::workspace::Workspace::create(d.path(), "P", "x", craft_anything_engine::workspace::TargetRef::None).unwrap();
+        let nested = ws.app_dir().join("pkg");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(ws.app_dir().join("pyproject.toml"), "").unwrap();
+        std::fs::write(nested.join("main.py"), "").unwrap();
+        std::fs::create_dir_all(ws.app_dir().join("src")).unwrap();
+        std::fs::write(ws.app_dir().join("Cargo.toml"), "").unwrap();
+        std::fs::write(ws.app_dir().join("src/main.rs"), "").unwrap();
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&nested).is_ok() {
+            std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        ws.manifest.stack = "Rust + egui (eframe)".into();
+        ws.manifest.build_toolchain = Some("Python".into());
+        let app = ws.app_dir();
+        let selected = toolchain_for_build(&app, &ws.manifest.stack, ws.manifest.build_toolchain.as_deref());
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(selected.map(|t| t.name.as_str()), Some("Python"), "the recorded toolchain is kept on an unknown scan");
+    }
+
+    /// An unreadable folder in the recorded toolchain's source scan doesn't prove its sources are
+    /// gone, so the recorded toolchain must not be replaced.
+    #[cfg(unix)]
+    #[test]
+    fn an_unknown_source_scan_keeps_the_recorded_toolchain() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let mut ws = craft_anything_engine::workspace::Workspace::create(d.path(), "P", "x", craft_anything_engine::workspace::TargetRef::None).unwrap();
+        let nested = ws.app_dir().join("pkg");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(ws.app_dir().join("pyproject.toml"), "").unwrap();
+        std::fs::write(nested.join("main.py"), "").unwrap();
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&nested).is_ok() {
+            // A test run as root can still list it; there is no unknown scan to exercise.
+            std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        ws.manifest.stack = "Rust + egui (eframe)".into();
+        ws.manifest.build_toolchain = Some("Python".into());
+        let app = ws.app_dir();
+        record_after_build(&mut ws.manifest, &app);
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(ws.manifest.build_toolchain.as_deref(), Some("Python"));
+        assert_eq!(ws.manifest.stack, "Rust + egui (eframe)");
+    }
+
+    #[test]
+    fn a_recorded_toolchain_names_the_stack_to_show() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("main.py"), "").unwrap();
+        assert_eq!(stack_for_toolchain("Python", d.path()).map(|s| s.name.as_str()), Some("Python"));
+        std::fs::write(d.path().join("Cargo.toml"), "[dependencies]\neframe = \"0.30\"\n").unwrap();
+        std::fs::create_dir_all(d.path().join("src")).unwrap();
+        std::fs::write(d.path().join("src/main.rs"), "").unwrap();
+        assert_eq!(stack_for_toolchain("Rust", d.path()).map(|s| s.name.as_str()), Some("Rust + egui (eframe)"), "the stack its Cargo dependencies name");
+        assert_eq!(stack_for_toolchain("Go", d.path()), None, "Go has no stack row");
+    }
+
+    /// R2.9 review: a stack named by one dependency file must not stop the search before another
+    /// file names the matching stack for the toolchain that was built.
+    #[test]
+    fn a_matching_stack_is_found_after_another_stack_from_used_in() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("package.json"), r#"{"dependencies": {"next": "16", "react": "19"}}"#).unwrap();
+        std::fs::write(d.path().join("Cargo.toml"), "[dependencies]\neframe = \"0.37\"\n").unwrap();
+        assert_eq!(used_in(d.path()).map(|s| s.name.as_str()), Some("Next.js + TypeScript"), "the stale package.json names a stack");
+        assert_eq!(stack_for_toolchain("Node.js", d.path()).map(|s| s.name.as_str()), Some("Next.js + TypeScript"));
+        assert_eq!(stack_for_toolchain("Rust", d.path()).map(|s| s.name.as_str()), Some("Rust + egui (eframe)"), "the Cargo stack is still found");
+    }
+
+    #[test]
+    fn the_toolchain_choice_follows_the_recorded_one_when_its_files_are_here() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("Cargo.toml"), "[dependencies]\neframe = \"0.37\"\n").unwrap();
+        std::fs::create_dir_all(d.path().join("src")).unwrap();
+        std::fs::write(d.path().join("src/main.rs"), "").unwrap();
+        assert_eq!(toolchain_for_build(d.path(), "Rust + egui (eframe)", Some("Rust")).map(|t| t.name.as_str()), Some("Rust"));
+        assert_eq!(
+            toolchain_for_build(d.path(), "Rust + egui (eframe)", Some("Python")).map(|t| t.name.as_str()),
+            Some("Rust"),
+            "an invalid recorded toolchain gives way to the stack's"
+        );
+        let both = tempfile::tempdir().unwrap();
+        std::fs::write(both.path().join("Cargo.toml"), "[dependencies]\neframe = \"0.37\"\n").unwrap();
+        std::fs::create_dir_all(both.path().join("src")).unwrap();
+        std::fs::write(both.path().join("src/main.rs"), "").unwrap();
+        std::fs::write(both.path().join("main.py"), "").unwrap();
+        assert_eq!(
+            toolchain_for_build(both.path(), "Rust + egui (eframe)", Some("Python")).map(|t| t.name.as_str()),
+            Some("Python"),
+            "a valid recorded toolchain wins even when the stack's is also valid"
+        );
+        let python = tempfile::tempdir().unwrap();
+        std::fs::write(python.path().join("main.py"), "").unwrap();
+        assert_eq!(toolchain_for_build(python.path(), "Rust + egui (eframe)", None).map(|t| t.name.as_str()), Some("Python"));
+        let marker = tempfile::tempdir().unwrap();
+        std::fs::write(marker.path().join("Cargo.toml"), "[package]\nname = \"new\"\n").unwrap();
+        assert_eq!(
+            toolchain_for_build(marker.path(), "Rust + egui (eframe)", None).map(|t| t.name.as_str()),
+            Some("Rust"),
+            "a project whose sources aren't written yet keeps the marker-only fallback"
+        );
     }
 
     #[test]

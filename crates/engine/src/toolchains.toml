@@ -5,23 +5,32 @@
 [[toolchain]]
 name = "Rust"
 found_by = ["Cargo.toml"]
+sources = ["*.rs"]
 build = ["cargo", "build", "--quiet"]
 test = ["cargo", "test", "--quiet"]
+default_stack = "Rust (console)"
+program_from = "Install Rust from https://rustup.rs"
 
 [[toolchain]]
 name = "Node.js"
 found_by = ["package.json"]
+sources = ["*.js", "*.ts", "*.jsx", "*.tsx", "*.mjs", "*.cjs"]
 build = ["npm", "run", "build", "--if-present"]
+generated_build = ["npm", "run", "build"]
 test = ["npm", "test"]
 test_script = "test"
 no_tests = ['echo "Error: no test specified" && exit 1']
 windows_program = "npm.cmd"
+program_from = "Install Node.js from https://nodejs.org"
 
 [[toolchain]]
 name = "Python"
 found_by = ["pyproject.toml", "requirements.txt", "setup.py"]
+sources = ["*.py"]
 standalone_entrypoints = true
 python_console_script = true
+default_stack = "Python"
+program_from = "Install Python 3 from https://www.python.org/downloads"
 build = ["python3", "-m", "compileall", "-q", "-f", "-x", '[\\/](\.?venv|node_modules|\.git)[\\/]', "."]
 test = ["python3", "-m", "pytest", "-q", "-p", "no:cacheprovider"]
 no_tests = ["no tests ran", "No module named pytest"]
@@ -37,7 +46,9 @@ launch = [
 [[toolchain]]
 name = "Go"
 found_by = ["go.mod"]
+sources = ["*.go"]
 build = ["go", "build", "./..."]
+program_from = "Install Go from https://go.dev/dl"
 test = ["go", "test", "./..."]
 launch = [
     { file = "main.go", command = ["go", "run", "."] },
@@ -47,24 +58,32 @@ launch = [
 [[toolchain]]
 name = ".NET"
 found_by = ["*.sln", "*.csproj"]
+sources = ["*.cs", "*.fs", "*.vb"]
+output_dirs = ["bin", "obj"]
 build = ["dotnet", "build", "--nologo", "-v", "q"]
+program_from = "Install the .NET SDK from https://dotnet.microsoft.com/download"
 test = ["dotnet", "test", "--nologo", "-v", "q"]
 launch = [{ file = "*.csproj", command = ["dotnet", "run", "--no-build", "--project", "{file}", "--"] }]
 
 [[toolchain]]
 name = "Maven"
 found_by = ["pom.xml"]
+sources = ["*.java", "*.kt"]
 # `package` rather than `compile`, so Play starts the jar of this build and not an older one.
 build = ["mvn", "-q", "-B", "package", "-DskipTests"]
 test = ["mvn", "-q", "-B", "test"]
+program_from = "Install Maven from https://maven.apache.org/download.cgi"
 local_programs = ["mvnw", "mvnw.cmd"]
 launch = [{ file = "target/*.jar", command = ["java", "-jar", "{file}"], runnable_jar = true }]
 
 [[toolchain]]
 name = "Gradle"
 found_by = ["build.gradle", "build.gradle.kts"]
+sources = ["*.java", "*.kt", "*.groovy"]
+output_dirs = ["build"]
 build = ["gradle", "-q", "assemble"]
 test = ["gradle", "-q", "test"]
+program_from = "Install Gradle from https://gradle.org/install"
 local_programs = ["gradlew", "gradlew.bat"]
 launch = [{ file = "build/libs/*.jar", command = ["java", "-jar", "{file}"], runnable_jar = true }]
 
@@ -73,4 +92,5 @@ name = "Make"
 found_by = ["Makefile"]
 build = ["make"]
 test = ["make", "test"]
+program_from = "Install Make (on Windows, the build tools) and put it on PATH"
 no_tests = ["make: *** No rule to make target `test'.", "make: *** No rule to make target 'test'.", "make: don't know how to make test."]

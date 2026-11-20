@@ -462,11 +462,11 @@ fn engine_stacks_get_their_own_steps_checks_and_play() {
 
     let d = tempfile::tempdir().unwrap();
     let stop = CheckStop::default();
-    assert_eq!(build_check(d.path(), "app/", "Unity", Some(ed), &stop), (false, "No Unity project found in app/ yet.".into()));
-    assert_eq!(build_check(d.path(), "app/", "Godot", Some(ed), &stop), (false, "No Godot project (project.godot) found in app/ yet.".into()));
-    assert!(build_check(d.path(), "app/", "Unreal Engine", Some(ed), &stop).1.contains(".uproject"));
+    assert_eq!(build_check(d.path(), "app/", "Unity", None, Some(ed), &stop), (false, "No Unity project found in app/ yet.".into()));
+    assert_eq!(build_check(d.path(), "app/", "Godot", None, Some(ed), &stop), (false, "No Godot project (project.godot) found in app/ yet.".into()));
+    assert!(build_check(d.path(), "app/", "Unreal Engine", None, Some(ed), &stop).1.contains(".uproject"));
     // #174: an app edited in place is said to be in the project folder, not in an app/ that isn't there.
-    let none = build_check(d.path(), "the project folder", "Builder's choice", None, &stop);
+    let none = build_check(d.path(), "the project folder", "Builder's choice", None, None, &stop);
     assert_eq!(none, (false, "No project to build found in the project folder yet.".into()));
 
     // Play: a Godot project opens in Godot; a packaged Unity build runs its own program.
@@ -4748,4 +4748,40 @@ fn a_new_build_stops_before_any_turn_when_its_stacks_program_is_missing() {
     for s in stacks::catalogue().iter().filter(|s| s.name.starts_with("Rust") || s.name == "Bevy") {
         assert_eq!(stacks::missing_program(&s.name, |_| false).map(|(p, from)| (p, !from.is_empty())), Some(("cargo", true)), "{}", s.name);
     }
+}
+
+/// An empty project preflights the stack's toolchain (Python included); a detected toolchain is
+/// still first, and a stack with no toolchain leaves the old stack-level fallback.
+#[test]
+fn the_empty_project_preflight_checks_the_stack_toolchain_after_detection() {
+    let empty = tempfile::tempdir().unwrap();
+    assert_eq!(preflight_toolchain(empty.path(), "Python", None).map(|t| t.name.as_str()), Some("Python"));
+    assert!(preflight_toolchain(empty.path(), "Builder's choice", None).is_none());
+    let stale = tempfile::tempdir().unwrap();
+    std::fs::write(stale.path().join("Cargo.toml"), "").unwrap();
+    std::fs::write(stale.path().join("main.py"), "").unwrap();
+    assert_eq!(
+        preflight_toolchain(stale.path(), "Python", None).map(|t| t.name.as_str()),
+        Some("Python"),
+        "a stale marker gives way to the source-backed toolchain the check will use"
+    );
+    let detected = tempfile::tempdir().unwrap();
+    std::fs::write(detected.path().join("go.mod"), "").unwrap();
+    std::fs::write(detected.path().join("main.go"), "").unwrap();
+    assert_eq!(preflight_toolchain(detected.path(), "Python", None).map(|t| t.name.as_str()), Some("Go"), "a detected source-backed toolchain comes first");
+}
+
+/// The preflight checks the program the toolchain will run, so Python is named even though its
+/// stack row has no `program` field, and a missing program says which one to install.
+#[test]
+fn a_build_names_the_missing_program_of_the_toolchain_it_will_run() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("main.py"), "").unwrap();
+    let tool = stacks::toolchain_for_build(d.path(), "Python", None).unwrap();
+    let (program, _) = tool.command(d.path(), &tool.build).unwrap();
+    let program = program.to_string_lossy().into_owned();
+    let err = missing_toolchain_program_stop(tool, d.path(), |_| false).unwrap_err();
+    assert!(err.message.contains(program.as_str()) && err.message.contains("Python"), "{err:?}");
+    assert!(err.remediation.as_deref().is_some_and(|r| r.contains("python.org")), "{err:?}");
+    assert!(missing_toolchain_program_stop(tool, d.path(), |p| p == program.as_str()).is_ok());
 }

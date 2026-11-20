@@ -66,6 +66,13 @@
       "description": "The builder finished its turn and the run's checks haven't reported on it yet, so a run\nthat picks this up only needs to check: nothing is left to build.",
       "type": "boolean"
     },
+    "build_toolchain": {
+      "description": "The toolchain the last finished build used (\"Python\", \"Rust\"…), also when it is the one\nthe recorded stack names; the build check uses it. None until a build records one.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "builder": {
       "description": "The AI the person chose to build this project (a backend's name); none: the default\nbuilder. The person's, like the budget.",
       "type": [

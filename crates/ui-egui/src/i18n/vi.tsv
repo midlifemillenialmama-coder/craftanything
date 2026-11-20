@@ -1500,6 +1500,10 @@ Sign in to a website	Đăng nhập vào một trang web
 Some shared files could not be hard-linked and were copied instead ({size}).	Một số tệp chia sẻ không thể tạo liên kết cứng nên đã được sao chép ({size}).
 This server lists several chat models. Choose one:	Máy chủ này có nhiều mô hình trò chuyện. Hãy chọn một:
 Choose a model	Chọn mô hình
+Ghidra is analysing the original. Pausing doesn't stop it, so nothing is lost.	Ghidra đang phân tích bản gốc. Tạm dừng không làm nó dừng lại, nên không mất gì cả.
+Stop the analysis	Dừng phân tích
+Ghidra stays off for this project until your next request, which starts it again from the beginning. Until then, decompiling uses the built-in engine.	Ghidra sẽ tắt cho dự án này cho đến yêu cầu tiếp theo của bạn, lúc đó việc phân tích bắt đầu lại từ đầu. Đến lúc đó, việc dịch ngược dùng engine tích hợp sẵn.
+Stop Ghidra's analysis	Dừng phân tích của Ghidra
 
 # Saved-builder notice: English until native-speaker review.
 The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.	The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.

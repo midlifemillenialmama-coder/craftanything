@@ -554,11 +554,27 @@ fn notes_added_while_it_works_reach_the_agent_at_its_next_step() {
     use craft_anything_engine::questions::{self, AskedQuestion};
     let asked = AskedQuestion { deep: false, ..AskedQuestion::new("where is the score kept".into(), "In src.".into(), true, "Stand-in".into(), None, 0) };
     questions::add(&ws, asked.clone()).unwrap();
-    let note = |id, text: &str| Note { id, text: format!("{text} (pictures: a.png)"), shown: text.into(), pictures: Vec::new(), questions: Vec::new() };
+    let note = |id, text: &str| Note {
+        id,
+        text: format!("{text} (pictures: a.png)"),
+        shown: text.into(),
+        pictures: Vec::new(),
+        questions: Vec::new(),
+        added: std::time::SystemTime::now(),
+    };
+    // A note left waiting when the person pressed Stop was asked before it: Ghidra stays off.
+    notes.lock().unwrap().push(note(9, "Older"));
+    std::thread::sleep(Duration::from_millis(5));
+    craft_anything_engine::tools::deep::stop_for(&ws.root).unwrap();
+    w.added(&mut ws, true, true).unwrap();
+    assert!(craft_anything_engine::tools::deep::stopped(&ws.root), "a note from before the stop doesn't undo it");
+    let _ = rx.try_iter().count();
+    std::thread::sleep(Duration::from_millis(5));
     let mut first = note(1, "Make it faster");
     first.questions = vec![asked];
     notes.lock().unwrap().extend([first, note(2, "A blue sky")]);
     let (p, more) = w.added(&mut ws, true, true).unwrap();
+    assert!(!craft_anything_engine::tools::deep::stopped(&ws.root), "a note is a new request, so Ghidra may run again");
     assert!(p.contains("where is the score kept") && p.contains("- Make it faster (pictures: a.png)\n- A blue sky"), "{p}");
     assert_eq!(more.len(), 1, "the question is marked told after the turn");
     assert!(notes.lock().unwrap().is_empty(), "each note goes in once");
@@ -637,6 +653,92 @@ fn a_note_written_for_the_hook_carries_its_answers() {
     // whether the answers are included, so they stay untold here.
     assert_eq!(run.take_notes().len(), 1);
     assert_eq!(questions::untold(&ws, false).len(), 1, "the next run decides whether to tell it");
+}
+
+/// A run as `RebuildRun::start` makes it, without a builder.
+fn bare_run(ws: &Workspace) -> RebuildRun {
+    let (_tx, rx) = std::sync::mpsc::channel();
+    let feed = Arc::new(Mutex::new(feed::FeedLog::open(ws)));
+    let activity = feed.lock().unwrap_or_else(PoisonError::into_inner).activity();
+    RebuildRun {
+        rx,
+        stop: CancelToken::default(),
+        inbox: Inbox::new(ws.inbox_dir()),
+        running: Arc::new(AtomicBool::new(true)),
+        preview: Arc::default(),
+        notes: Arc::default(),
+        clean_room: false,
+        feed,
+        root: ws.root.clone(),
+        started: Instant::now(),
+        activity,
+    }
+}
+
+/// The worker of `run`, reading the notes the run is given.
+fn notes_worker(ws: &Workspace, run: &RebuildRun) -> Worker {
+    let (tx, _rx) = std::sync::mpsc::channel();
+    Worker {
+        wake: Default::default(),
+        engine: Arc::new(Engine::new(craft_anything_engine::testing::session())),
+        tx,
+        stop: CancelToken::default(),
+        preview: Arc::default(),
+        seen: HashSet::new(),
+        inbox: Inbox::new(ws.inbox_dir()),
+        editor: None,
+        notes: run.notes.clone(),
+        feed: run.feed.clone(),
+        keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
+        kept_checks: Mutex::default(),
+        assets: false,
+        usage: None,
+        self_check: None,
+        reset_progress_after_notes: false,
+    }
+}
+
+/// #948 (review on #1903): a note left waiting when the app closed, then a stop, then a run
+/// started without a new request. The run takes the note back as `start` does and the builder
+/// reads it: the note was asked before the stop, so Ghidra stays off. A note left after the stop,
+/// or one from a version that kept no time, is a new request and lets Ghidra run again.
+#[test]
+fn a_note_left_before_a_stop_keeps_it_across_a_restart() {
+    use craft_anything_engine::tools::deep;
+    // Run, then restart without a new request: what the builder sees once it reads the left notes.
+    fn restart(ws: &mut Workspace) -> bool {
+        let left = notes::take_left(&notes::notes_dir(&ws.inbox_dir()), true);
+        assert_eq!(left.len(), 1, "the note was left for the next run");
+        let run = bare_run(ws);
+        run.restore_left(left);
+        notes_worker(ws, &run).added(ws, true, true).expect("the left note is read");
+        assert!(run.waiting().is_empty(), "the builder took it");
+        deep::stopped(&ws.root)
+    }
+
+    // Left before the stop: the stop holds.
+    let d = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::create(d.path(), "x", "Copy this game", TargetRef::None).unwrap();
+    bare_run(&ws).add_note("make it blue".into(), "make it blue".into(), Vec::new());
+    std::thread::sleep(Duration::from_millis(5));
+    deep::stop_for(&ws.root).unwrap();
+    assert!(restart(&mut ws), "a note from before the stop doesn't undo it after a restart");
+
+    // Left after the stop: a new request.
+    let d = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::create(d.path(), "x", "Copy this game", TargetRef::None).unwrap();
+    deep::stop_for(&ws.root).unwrap();
+    std::thread::sleep(Duration::from_millis(5));
+    bare_run(&ws).add_note("make it blue".into(), "make it blue".into(), Vec::new());
+    assert!(!restart(&mut ws), "a note added after the stop lets Ghidra run again");
+
+    // An older version's note keeps no time: it's taken as new, as before this change.
+    let d = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::create(d.path(), "x", "Copy this game", TargetRef::None).unwrap();
+    deep::stop_for(&ws.root).unwrap();
+    let old = notes::Left { text: "make it blue".into(), shown: "make it blue".into(), pictures: Vec::new(), added: None };
+    notes::hand_over(&notes::notes_dir(&ws.inbox_dir()), 1, "make it blue", Some(&old)).unwrap();
+    assert!(!restart(&mut ws), "a note with no time is a new request");
 }
 
 #[test]
@@ -1304,7 +1406,7 @@ fn needs_an_agent_app() {
     let hub = AiHub::with_stores(engine, d.path().join("settings.toml"), crate::KeyStore::file_only(d.path().join("keys.toml")));
     let ws = Workspace::create(d.path(), "x", "y", TargetRef::None).unwrap();
     let dir = notes::notes_dir(&ws.inbox_dir());
-    let left = notes::Left { text: "make it blue".into(), shown: "make it blue".into(), pictures: Vec::new() };
+    let left = notes::Left { text: "make it blue".into(), shown: "make it blue".into(), pictures: Vec::new(), added: None };
     notes::hand_over(&dir, 1, "make it blue", Some(&left)).unwrap();
     let err = RebuildRun::start(&hub, ws, RunOptions::default()).err().unwrap();
     assert!(err.message.contains("coding agent"), "{}", err.message);
@@ -2336,7 +2438,7 @@ mod picking_up_a_build {
         use crate::model::{Block, ChatModel, Delta, Stop, StopReason, TurnRequest, TurnResult};
         type Notes = Arc<Mutex<Vec<Note>>>;
         fn note(text: &str) -> Note {
-            Note { id: 42, text: text.into(), shown: text.into(), pictures: Vec::new(), questions: Vec::new() }
+            Note { id: 42, text: text.into(), shown: text.into(), pictures: Vec::new(), questions: Vec::new(), added: std::time::SystemTime::now() }
         }
         struct NoteModel {
             script: Scripted,
@@ -3955,8 +4057,22 @@ fn a_note_the_builder_took_at_a_step_joins_the_feed_and_isnt_sent_again() {
         inbox: Inbox::new(ws.inbox_dir()),
         editor: None,
         notes: Arc::new(Mutex::new(vec![
-            Note { id: 1, text: "make the header blue".into(), shown: "make the header blue".into(), pictures: Vec::new(), questions: vec![asked] },
-            Note { id: 2, text: "add a footer".into(), shown: "add a footer".into(), pictures: Vec::new(), questions: Vec::new() },
+            Note {
+                id: 1,
+                text: "make the header blue".into(),
+                shown: "make the header blue".into(),
+                pictures: Vec::new(),
+                questions: vec![asked],
+                added: std::time::SystemTime::now() + Duration::from_secs(1),
+            },
+            Note {
+                id: 2,
+                text: "add a footer".into(),
+                shown: "add a footer".into(),
+                pictures: Vec::new(),
+                questions: Vec::new(),
+                added: std::time::SystemTime::now() + Duration::from_secs(1),
+            },
         ])),
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
@@ -3973,7 +4089,9 @@ fn a_note_the_builder_took_at_a_step_joins_the_feed_and_isnt_sent_again() {
     std::fs::rename(dir.join("2.json"), dir.join("2.wait")).unwrap();
     assert_eq!(notes::claim(&dir), ["make the header blue"]);
     std::fs::rename(dir.join("2.wait"), dir.join("2.json")).unwrap();
+    craft_anything_engine::tools::deep::stop_for(&ws.root).unwrap();
     w.relay_read_notes(&ws);
+    assert!(!craft_anything_engine::tools::deep::stopped(&ws.root), "a note the hook took is a new request too");
     assert!(questions::untold(&ws, false).is_empty(), "the answers in a read note are told");
     let shown: Vec<String> = rx.try_iter().filter_map(|e| if let RunEvent::Note { shown, .. } = e { Some(shown) } else { None }).collect();
     assert_eq!(shown, ["make the header blue"], "it joins the feed as soon as the builder took it");
@@ -4654,6 +4772,19 @@ fn deleting_the_project_stops_its_analysis() {
     assert!(ended.is_err(), "it stopped, it didn't finish: {ended:?}");
 }
 
+/// The person stopped Ghidra for the project: a study doesn't start it again until a new request.
+#[test]
+fn a_study_leaves_ghidra_off_once_the_person_stopped_it() {
+    let d = tempfile::Builder::new().prefix("ca").tempdir().unwrap();
+    let (w, _rx, ws, program) = waiting_for_another_analysis(d.path(), 600);
+    craft_anything_engine::tools::deep::stop_for(&ws.root).unwrap();
+    assert!(w.prepare_ghidra(&program, &ws.root).is_none(), "stopped, so not started");
+    craft_anything_engine::tools::deep::resume(&ws.root).unwrap();
+    let done = w.prepare_ghidra(&program, &ws.root).expect("a new request lets it run");
+    ws.delete().unwrap();
+    assert!(done.recv_timeout(Duration::from_secs(20)).is_ok_and(|r| r.is_err()), "ends with the project");
+}
+
 /// A later run skips the study; in Deep mode it opens the program again, so the builder's tool
 /// server has it and its first `native_*` call doesn't say "Nothing is open yet" (#1421).
 #[test]
@@ -4748,4 +4879,28 @@ fn a_new_build_stops_before_any_turn_when_its_stacks_program_is_missing() {
     for s in stacks::catalogue().iter().filter(|s| s.name.starts_with("Rust") || s.name == "Bevy") {
         assert_eq!(stacks::missing_program(&s.name, |_| false).map(|(p, from)| (p, !from.is_empty())), Some(("cargo", true)), "{}", s.name);
     }
+}
+
+/// #1903 review: a request (a message or a note) never fails because the stop's lock is busy:
+/// Ghidra stays off, and the request goes on.
+#[test]
+fn a_busy_stop_lock_never_fails_a_request() {
+    let d = tempfile::Builder::new().prefix("ca").tempdir().unwrap();
+    let ws = Workspace::create(d.path(), "Game", "a game", TargetRef::None).unwrap();
+    craft_anything_engine::tools::deep::stop_for(&ws.root).unwrap();
+    let lock = std::fs::OpenOptions::new().read(true).write(true).open(ws.root.join(craft_anything_engine::tools::deep::STOP_LOCK)).unwrap();
+    lock.lock().unwrap();
+    super::let_ghidra_run_again(&ws.root, std::time::SystemTime::now());
+    assert!(craft_anything_engine::tools::deep::stopped(&ws.root), "couldn't take the lock, so it stays off");
+    lock.unlock().unwrap();
+    super::let_ghidra_run_again(&ws.root, std::time::SystemTime::now());
+    assert!(!craft_anything_engine::tools::deep::stopped(&ws.root));
+}
+
+/// #1903 review: the stop and its lock are the project's own files, so a builder working in the
+/// project folder can't remove the stop.
+#[test]
+fn the_stop_files_are_the_projects_own() {
+    use craft_anything_engine::workspace::OWN_NAMES;
+    assert!(OWN_NAMES.contains(&craft_anything_engine::tools::deep::STOPPED) && OWN_NAMES.contains(&craft_anything_engine::tools::deep::STOP_LOCK));
 }

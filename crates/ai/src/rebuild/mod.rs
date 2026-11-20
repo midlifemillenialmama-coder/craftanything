@@ -152,6 +152,9 @@ pub struct RunOptions {
     /// A free session is read first; this is the fallback while it is held; the saved settings
     /// are the last fallback.
     pub clean_room: Option<bool>,
+    /// When the person made the request: a stop of Ghidra after it holds even if the run starts
+    /// later (it waited in the queue, or for a key store). Set when the options are made.
+    pub asked: std::time::SystemTime,
 }
 
 impl Default for RunOptions {
@@ -169,6 +172,7 @@ impl Default for RunOptions {
             adapters: Default::default(),
             wake: Wake::default(),
             clean_room: None,
+            asked: std::time::SystemTime::now(),
         }
     }
 }
@@ -188,6 +192,8 @@ pub struct Note {
     /// they're marked told when the builder reads the note or when the after-turn path sends it.
     /// The raw note text stays in [`text`](Self::text), so a later run filters them by its mode.
     pub questions: Vec<AskedQuestion>,
+    /// When the person added it: a note from before they stopped Ghidra doesn't start it again.
+    pub added: std::time::SystemTime,
 }
 
 /// The note text with the latest Just-ask answers this mode may show. `skip` holds answers an
@@ -199,6 +205,24 @@ fn note_with_just_asked(text: String, ws: &Workspace, clean_room: bool, skip: &[
         return (text, asked);
     }
     (format!("{}{text}", just_asked(&asked)), asked)
+}
+
+/// A note is a new request, so Ghidra may be used again if the person stopped it before adding
+/// the newest of `notes` (#948). A failed removal leaves it off, which the built-in engine
+/// covers, so it's only logged.
+fn resume_ghidra<'a>(ws: &Workspace, notes: impl IntoIterator<Item = &'a Note>) {
+    let Some(asked) = notes.into_iter().filter(|n| !n.text.trim().is_empty()).map(|n| n.added).max() else { return };
+    let_ghidra_run_again(&ws.root, asked);
+}
+
+/// A request made at `asked` (a message or a note): Ghidra may be used again for `project` if the
+/// person stopped it before then (#948). Neither kind of request fails when that can't be done (the
+/// stop's lock is busy, a file can't be removed): Ghidra stays off, the built-in engine covers it,
+/// and it's logged.
+fn let_ghidra_run_again(project: &std::path::Path, asked: std::time::SystemTime) {
+    if let Err(e) = craft_anything_engine::tools::deep::resume_for(project, asked) {
+        log::warn!("couldn't let Ghidra be used again for this project: {e}");
+    }
 }
 
 fn same_question(a: &AskedQuestion, b: &AskedQuestion) -> bool {
@@ -373,12 +397,18 @@ impl RebuildRun {
             .map_err(|e| ToolError::internal(e.to_string()))?;
         let activity = feed.lock().unwrap_or_else(PoisonError::into_inner).activity();
         let run = RebuildRun { rx, stop, inbox, running, preview, notes, clean_room, feed, root, started: Instant::now(), activity };
-        // Waiting again with files of their own: the builder takes them at its next step or after
-        // its turn, and a run that ends first hands them to the next one, as with any note.
-        for n in left {
-            run.add_note(n.text, n.shown, n.pictures);
-        }
+        run.restore_left(left);
         Ok(run)
+    }
+
+    /// Notes an earlier run left, waiting again with files of their own: the builder takes them at
+    /// its next step or after its turn, and a run that ends first hands them to the next one, as
+    /// with any note. Each keeps the time it was added, so one from before a stop doesn't undo it.
+    fn restore_left(&self, left: Vec<notes::Left>) {
+        for n in left {
+            let added = n.added.unwrap_or_else(std::time::SystemTime::now);
+            self.add_note_at(n.text, n.shown, n.pictures, added);
+        }
     }
 
     /// Add something while it works; the agent reads it at its next step, and only then does it
@@ -390,6 +420,11 @@ impl RebuildRun {
     /// The in-memory text stays raw, and the answers are marked told only when the note is read or
     /// sent.
     pub fn add_note(&self, text: String, shown: String, pictures: Vec<PathBuf>) -> u64 {
+        self.add_note_at(text, shown, pictures, std::time::SystemTime::now())
+    }
+
+    /// [`Self::add_note`] for a note the person added at `added` (one an earlier run left).
+    fn add_note_at(&self, text: String, shown: String, pictures: Vec<PathBuf>, added: std::time::SystemTime) -> u64 {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
         let mut file_text = text.clone();
@@ -407,11 +442,11 @@ impl RebuildRun {
         // Also left for an agent that takes notes at its next step; without it, after the turn.
         // The in-memory note keeps the raw text: if a later run takes it, that run filters the
         // answers by its own mode instead of inheriting this run's.
-        let left = notes::Left { text: text.clone(), shown: shown.clone(), pictures: pictures.clone() };
+        let left = notes::Left { text: text.clone(), shown: shown.clone(), pictures: pictures.clone(), added: Some(added) };
         if let Err(e) = notes::hand_over(&notes::notes_dir(self.inbox.dir()), id, &file_text, Some(&left)) {
             log::warn!("A note waits for the builder's turn to end: {}", e.message);
         }
-        self.notes.lock().unwrap_or_else(PoisonError::into_inner).push(Note { id, text, shown, pictures, questions });
+        self.notes.lock().unwrap_or_else(PoisonError::into_inner).push(Note { id, text, shown, pictures, questions, added });
         id
     }
 
@@ -710,6 +745,7 @@ impl Worker {
         if notes.is_empty() {
             return None;
         }
+        resume_ghidra(ws, &notes);
         for n in &notes {
             self.emit(RunEvent::Note { shown: n.shown.clone(), pictures: n.pictures.clone() });
         }
@@ -815,6 +851,8 @@ impl Worker {
         if opts.message.as_deref().is_some_and(|m| !m.trim().is_empty()) {
             progress.reset();
             progress.save(&ws.root)?;
+            // Ghidra, if the person stopped it for this project, may be used again (#948).
+            let_ghidra_run_again(&ws.root, opts.asked);
         }
         // Fail before any work when the agent's tools are missing or it can't sign in.
         let remote_host = entry.config.ssh_host.as_deref().map(str::trim).filter(|h| !h.is_empty());
@@ -1426,6 +1464,7 @@ impl Worker {
             read
         };
         let new_request = read.iter().any(|n| !n.text.trim().is_empty());
+        resume_ghidra(ws, &read);
         for n in read {
             // The agent's hook took the note, so the Just-ask answers in its text were told.
             if !n.questions.is_empty()

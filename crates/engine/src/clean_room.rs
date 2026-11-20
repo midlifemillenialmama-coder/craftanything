@@ -92,6 +92,7 @@ pub const TOOLS: &[&str] = &[
     "engines_list",
     "engines_install",
     "engines_app_open",
+    "engines_analysis_stop",
     "engines_adb_check",
     "engines_apktool_check",
     "engines_jeb_check",

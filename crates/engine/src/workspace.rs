@@ -80,6 +80,10 @@ fn copy_tree(from: &Path, to: &Path, skip: &dyn Fn(&Path) -> bool, depth: usize)
     Ok(())
 }
 
+/// Ghidra was stopped for this project's builds (`tools::deep::STOPPED`), and its lock file.
+pub const GHIDRA_STOPPED: &str = "ghidra-stopped";
+pub const GHIDRA_STOP_LOCK: &str = "ghidra-stop.lock";
+
 /// The current `craft.json` format version. Bumping it means appending a step to [`MANIFEST_STEPS`].
 pub const MANIFEST_VERSION: u32 = 5;
 
@@ -1071,6 +1075,8 @@ pub const AGENT_SESSION_FILE: &str = "agent-session.jsonl";
 /// mustn't already have any of them.
 pub const OWN_NAMES: &[&str] = &[
     MANIFEST,
+    GHIDRA_STOPPED,
+    GHIDRA_STOP_LOCK,
     crate::feed::FEED_FILE,
     crate::questions::QUESTIONS_FILE,
     USAGE_FILE,

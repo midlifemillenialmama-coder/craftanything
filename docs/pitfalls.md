@@ -506,6 +506,12 @@ it either. Send its task on stdin, with no task argument. A literal `-` is a std
 Harness versions but is the task itself in older ones; omitting the task makes those older versions
 fail before a model runs. They need an update to a headless profile that supports stdin.
 
+**A stop that only one process heard.** The first Stop button for Ghidra took the project out of
+the app's in-memory list of analyses; the build then decompiled through its tool server (another
+process), which found no saved analysis and started the same hours-long one again, with no Stop
+for it. A decision several processes must honour is kept where they all look (a file in the
+project folder), checked by every path that can start the work, and cleared at one stated point.
+
 **A first analysis that waited for a lock it could never take.** Ghidra's analysis lock is created
 with `create_new` in `ghidra-cache/`, which only existed on machines that had used it before; on a
 fresh store the create failed and the loop read that as "someone else holds it" until the

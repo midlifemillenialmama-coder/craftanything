@@ -1500,6 +1500,10 @@ Sign in to a website	Entrar em um site
 Some shared files could not be hard-linked and were copied instead ({size}).	Alguns arquivos compartilhados não puderam ser vinculados por hard link e foram copiados ({size}).
 This server lists several chat models. Choose one:	Este servidor oferece vários modelos de chat. Escolha um:
 Choose a model	Escolha um modelo
+Ghidra is analysing the original. Pausing doesn't stop it, so nothing is lost.	O Ghidra está analisando o original. Pausar não o interrompe, então nada se perde.
+Stop the analysis	Parar a análise
+Ghidra stays off for this project until your next request, which starts it again from the beginning. Until then, decompiling uses the built-in engine.	O Ghidra fica desligado para este projeto até o seu próximo pedido, que recomeça a análise do início. Até lá, a descompilação usa a engine integrada.
+Stop Ghidra's analysis	Parar a análise do Ghidra
 
 # Saved-builder notice: English until native-speaker review.
 The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.	The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.

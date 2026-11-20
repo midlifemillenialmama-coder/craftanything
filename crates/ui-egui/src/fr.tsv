@@ -1497,6 +1497,10 @@ You're up to date.	Vous êtes à jour.
 {version} is available.	La version {version} est disponible.
 Forget a website sign-in	Oublier la connexion à un site web
 Sign in to a website	Se connecter à un site web
+Ghidra is analysing the original. Pausing doesn't stop it, so nothing is lost.	Ghidra analyse l'original. La pause ne l'arrête pas, donc rien n'est perdu.
+Stop the analysis	Arrêter l'analyse
+Ghidra stays off for this project until your next request, which starts it again from the beginning. Until then, decompiling uses the built-in engine.	Ghidra reste arrêté pour ce projet jusqu'à votre prochaine demande, qui relance l'analyse depuis le début. D'ici là, la décompilation utilise le moteur intégré.
+Stop Ghidra's analysis	Arrêter l'analyse de Ghidra
 
 # Saved-builder notice: English until native-speaker review.
 The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.	The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.

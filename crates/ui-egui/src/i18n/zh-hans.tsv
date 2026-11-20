@@ -1500,6 +1500,10 @@ Sign in to a website	登录网站
 Some shared files could not be hard-linked and were copied instead ({size}).	部分共享文件无法建立硬链接，已改为复制（{size}）。
 This server lists several chat models. Choose one:	此服务器提供多个聊天模型。请选择一个：
 Choose a model	选择模型
+Ghidra is analysing the original. Pausing doesn't stop it, so nothing is lost.	Ghidra 正在分析原程序。暂停不会停止它，所以不会丢失任何进度。
+Stop the analysis	停止分析
+Ghidra stays off for this project until your next request, which starts it again from the beginning. Until then, decompiling uses the built-in engine.	在你下一次提出请求之前，此项目不再使用 Ghidra；下一次请求会从头重新开始分析。在此之前，反编译使用内置引擎。
+Stop Ghidra's analysis	停止 Ghidra 的分析
 
 # Saved-builder notice: English until native-speaker review.
 The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.	The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.

@@ -1071,6 +1071,11 @@ Owner: open · Status: in progress
       — claimed: tanish2k09, branch bugfix/r1.5-https-plugin-redirects
 - [ ] Live-check an https MCP plugin against a real server that redirects (to another path and
       to another host), and that the system proxy still carries https plugin requests
+- [x] Stop Ghidra's analysis from the project and keep the project (#948): pausing lets it go
+      on, so only closing the app or deleting the project stopped it. Stopped, it stays off for
+      the project's builds, the builder's tool server included, until a new request: "Stop the
+      analysis" on the project, `engines_analysis_stop`, a `ghidra-stopped` file in its folder
+      — claimed: justinjohn0306, branch `feature/r1.5-stop-ghidra-for-project`
 - [ ] More pins once their hashes are checked against the publisher: Chromium (no published
       checksums found yet), Rizin for Linux (the tar.xz unpacks to ~800 MB, so it needs streaming
       extraction) and macOS (a .pkg)

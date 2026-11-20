@@ -1478,8 +1478,17 @@ Owner: open · Status: in progress
       — claimed: Plastic-time, branch bugfix/r2.2-windows-home-is-the-user-profile
 - [ ] CI runs the tests on Ubuntu only, so `cfg(windows)` tests (search paths, consoles, Job
       Objects) are checked only on contributors' machines: run them on a Windows runner too
-- [ ] "Claude Code on <ssh host>" is offered for any SSH host, whether or not it has Claude Code
-      (#62)
+- [x] "Claude Code on <ssh host>" is offered for any SSH host, whether or not it has Claude Code
+      (#62). Done: the suggestions stay, but adding one in Settings → AI or the CLI runs
+      `ssh <host> -- <program> --version` with the program named by the suggestion or the one the
+      person gives for that host, within a 15-second deadline, and saves nothing when the host
+      doesn't have it, naming the exact check command; ssh's own failures use the shared
+      `ssh::diagnose` (a refused key, an untrusted host key, an unreachable host), a non-executable
+      remote file's shell 126 is named as a launch failure while a program's own 126 is accepted, a
+      missing local ssh keeps its install message, and a host beginning with `-` or a git server
+      alias is refused before ssh. The Connect job's cancel stops the check, an agent on this computer is not
+      checked, and first run leaves SSH hosts to Settings
+      — claimed: AlexJoaquimPereira, branch bugfix/r2.2-ssh-agent-check
 - [ ] Gemini CLI's sign-in reportedly refuses individuals now (#400): check, and stop recommending
       it in the builder setup dialog if so
 - [x] DeepSeek Harness: an adapter runs `dsh --profile headless "<task>"` and hands it our tool

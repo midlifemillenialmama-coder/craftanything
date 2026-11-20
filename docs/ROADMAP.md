@@ -1608,7 +1608,7 @@ Owner: open · Status: in progress
       — PR #1849; claimed: rudycelekli, branch test/r2.7-real-go-project-checks
 - [ ] That opt-in Go test writes Go's build cache and module folder in the real home when someone
       runs it (review of #1849). Let the check functions take environment for the child, and give
-      the test a `GOCACHE` and `GOPATH` inside its temp folder
+      the test a `GOCACHE` and `GOPATH` inside its temp folder — claimed: rmsff, branch test/r2.7-go-test-temp-cache
 - [ ] Run the .NET, Maven and Gradle rows of `[[toolchain]]` on real projects, and every row
       on Windows (`windows_program`): Rust, Node.js, Python, Go and Make were run for real, on a Mac
       only. Also a person's own Unity project: it's opened in batch mode, which should exit with

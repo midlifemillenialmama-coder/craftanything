@@ -212,6 +212,10 @@ after stopping the server. macOS answers `setsockopt` with `Invalid argument` on
 both directions (a reset, or the peer's FIN after our own `shutdown(Write)`); Linux doesn't check,
 so the test failed only on Macs. Set socket options right after connecting, before anything can
 close the connection.
+It happened again in the CDP client, which sets a timeout before every read and write: once the
+browser closed the socket, a Mac reported the lost connection as an internal error (about one test
+run in 40). Where a socket option must be set on a live connection, a refusal there is the
+connection lost (`WsConn::lost`), not a fault of ours.
 
 **A script written and run at once.** Tests that write a stand-in program and start it failed now
 and then on Linux with "Text file busy": another test thread was starting a child at that moment,

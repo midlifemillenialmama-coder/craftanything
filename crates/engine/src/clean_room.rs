@@ -108,6 +108,7 @@ pub const TOOLS: &[&str] = &[
     "web_site_open",
     "web_site_capture",
     "web_page_states_capture",
+    "web_page_dialog_answer",
     "web_page_screenshot_take",
     "web_pixels_compare",
     "web_site_close",

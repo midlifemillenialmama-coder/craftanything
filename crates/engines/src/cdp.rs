@@ -403,6 +403,14 @@ impl WsConn {
         }
     }
 
+    /// A socket option refused on the open connection: macOS answers `setsockopt` with "Invalid
+    /// argument" once the browser has closed the socket both ways, so this is the connection
+    /// lost, not a fault of ours.
+    fn lost(&mut self, doing: &str, e: &std::io::Error) -> ToolError {
+        self.closed = true;
+        ToolError::new(ErrorCode::EngineMissing, format!("{doing} the browser failed: {e}"))
+    }
+
     /// Send one JSON text message.
     pub fn send_text(&mut self, text: &str, dl: &Deadline) -> Result<(), ToolError> {
         if self.closed {
@@ -431,7 +439,8 @@ impl WsConn {
         for (i, b) in payload.iter().enumerate() {
             frame.push(b ^ mask[i & 3]);
         }
-        self.stream.set_write_timeout(Some(dl.remaining()?)).map_err(|e| ToolError::internal(e.to_string()))?;
+        let wait = dl.remaining()?;
+        self.stream.set_write_timeout(Some(wait)).map_err(|e| self.lost("writing to", &e))?;
         self.stream.write_all(&frame).and_then(|_| self.stream.flush()).map_err(|e| {
             self.closed = true;
             ToolError::new(ErrorCode::EngineMissing, format!("writing to the browser failed: {e}"))
@@ -491,7 +500,7 @@ impl WsConn {
             }
             let wait = dl.remaining()?.min(POLL);
             let mut tmp = [0u8; 32 * 1024];
-            self.stream.set_read_timeout(Some(wait)).map_err(|e| ToolError::internal(e.to_string()))?;
+            self.stream.set_read_timeout(Some(wait)).map_err(|e| self.lost("reading from", &e))?;
             match self.stream.read(&mut tmp) {
                 Ok(0) => {
                     self.closed = true;
@@ -584,7 +593,61 @@ pub struct CdpClient {
     events: VecDeque<Value>,
     max_events: usize,
     dropped_events: u64,
-    answer_dialogs: bool,
+    dialogs: Dialogs,
+    /// The `confirm` or `prompt` the page is waiting on, held for the caller ([`Dialogs::Notices`]).
+    waiting: Option<Value>,
+    /// How many questions have been held, so a call can tell a new one from the one it answers.
+    questions: u64,
+    /// An answer that was sent but whose reply hadn't come when its call ended ([`Unsettled`]).
+    unsettled: Option<Unsettled>,
+    /// The frames that started loading and haven't stopped (or gone), by id, as events arrive:
+    /// kept with the connection, so a wait can resume after a question. Bounded ([`MAX_LOADING_FRAMES`]).
+    loading_frames: std::collections::HashSet<String>,
+    /// A frame start was dropped at the cap: whether everything stopped can't be known, so the
+    /// page counts as loading and a wait runs to its own bound.
+    loading_unknown: bool,
+}
+
+/// Most frames a client tracks as loading; a page can start any number of them.
+const MAX_LOADING_FRAMES: usize = 256;
+
+/// An answer sent without a word back yet. The browser applies an answer to whatever dialog is
+/// showing, with no id for it, so another answer isn't sent until this one's outcome is read: it
+/// may have been taken, and the page may already be asking something else.
+#[derive(Debug)]
+struct Unsettled {
+    /// The request id its reply will carry.
+    id: u64,
+    /// [`CdpClient::questions`] when it was sent: a higher count means the page went on.
+    asked_before: u64,
+    /// Its reply once seen: taken, or the browser's refusal.
+    reply: Option<Result<(), ToolError>>,
+    /// Its `accept`, so what the page took can be said if it was taken.
+    accept: Option<bool>,
+}
+
+/// Which of a page's own dialogs a client answers by itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dialogs {
+    /// None: a person (or nobody) answers them.
+    Left,
+    /// `alert` and leave-page questions; a `confirm` or `prompt` is held for the caller.
+    Notices,
+    /// Every dialog, by [`dialog_answer`].
+    All,
+}
+
+/// The event that says a page's dialog went away (answered by us, by a person or by the page).
+pub const DIALOG_CLOSED: &str = "Page.javascriptDialogClosed";
+
+/// The key in a [`ToolError`]'s details that carries the dialog a call stopped at: the
+/// [`DIALOG_OPENING`] params (`type`, `message`, `defaultPrompt`, `url`).
+pub const DIALOG_DETAIL: &str = "dialog_open";
+
+/// Whether a dialog only tells the visitor something, so its one answer can be given without
+/// asking anyone: an `alert` (OK) or a leave-page question (going on with the navigation).
+pub fn is_notice(opening: &Value) -> bool {
+    matches!(opening.get("type").and_then(Value::as_str), Some("alert" | "beforeunload"))
 }
 
 /// The event a page's `alert`, `confirm`, `prompt` or leave-page question raises. Until it's
@@ -595,8 +658,19 @@ pub const DIALOG_OPENING: &str = "Page.javascriptDialogOpening";
 /// closed and a leave-page question lets the page go (what a visitor's only click would do), while
 /// a `confirm` or `prompt` is dismissed, so nothing the page asks to do is agreed to on our behalf.
 pub fn dialog_answer(opening: &Value) -> Value {
-    let accept = matches!(opening.get("type").and_then(Value::as_str), Some("alert" | "beforeunload"));
-    json!({"accept": accept})
+    json!({"accept": is_notice(opening)})
+}
+
+/// What became of [`CdpClient::answer_dialog`].
+#[derive(Debug)]
+pub enum DialogAnswer {
+    /// The page took the answer and went on.
+    Answered,
+    /// An earlier answer, sent but not confirmed when its call ended, turned out to be taken; this
+    /// one wasn't sent, so it can't land on a question asked since. `accept` is the one the page took.
+    AnsweredBefore { accept: Option<bool> },
+    /// The browser refused: no dialog is showing (the page closed it itself). Its error is kept.
+    NotShowing(ToolError),
 }
 
 /// A CDP event: domain-qualified method and its params.
@@ -609,7 +683,19 @@ pub struct CdpEvent {
 
 impl CdpClient {
     pub fn new(conn: WsConn) -> Self {
-        CdpClient { conn, next_id: 1, events: VecDeque::new(), max_events: 200_000, dropped_events: 0, answer_dialogs: false }
+        CdpClient {
+            conn,
+            next_id: 1,
+            events: VecDeque::new(),
+            max_events: 200_000,
+            dropped_events: 0,
+            dialogs: Dialogs::Left,
+            waiting: None,
+            questions: 0,
+            unsettled: None,
+            loading_frames: std::collections::HashSet::new(),
+            loading_unknown: false,
+        }
     }
 
     /// Answer every dialog the page opens by itself ([`dialog_answer`]) as soon as it's seen, so a
@@ -617,17 +703,168 @@ impl CdpClient {
     /// deadline. The [`DIALOG_OPENING`] events stay in the queue for the caller to report.
     /// Needs `Page.enable` on the session; leave it off where a person answers the page.
     pub fn answering_dialogs(mut self) -> Self {
-        self.answer_dialogs = true;
+        self.dialogs = Dialogs::All;
         self
+    }
+
+    /// Answer only the dialogs that have one answer ([`is_notice`]); hold a `confirm` or `prompt`
+    /// for the caller to decide. While one is open the page's scripts wait, so a call that is
+    /// waiting for its reply when it opens ends at once with an error carrying it in its details
+    /// ([`DIALOG_DETAIL`]), and [`Self::waiting_dialog`] says what it asks until it closes.
+    pub fn answering_notices(mut self) -> Self {
+        self.dialogs = Dialogs::Notices;
+        self
+    }
+
+    /// The `confirm` or `prompt` this page is waiting on ([`Self::answering_notices`]): its
+    /// [`DIALOG_OPENING`] params, until a [`DIALOG_CLOSED`] event is seen.
+    pub fn waiting_dialog(&self) -> Option<&Value> {
+        self.waiting.as_ref()
+    }
+
+    /// Whether this client dismisses a `confirm` or `prompt` itself ([`Self::answering_dialogs`]).
+    pub fn dismisses_questions(&self) -> bool {
+        self.dialogs == Dialogs::All
     }
 
     pub fn dropped_events(&self) -> u64 {
         self.dropped_events
     }
 
+    /// From now on, dismiss every dialog the page opens (alerts and leave-page questions still
+    /// accepted, [`dialog_answer`]), for leaving a page: a question asked in reply to the one being
+    /// dismissed is answered too, rather than left with nothing to answer it.
+    pub fn dismiss_from_now(&mut self) {
+        self.dialogs = Dialogs::All;
+    }
+
+    /// Whether a frame of the page is still loading, from the frame events seen so far.
+    /// Past [`MAX_LOADING_FRAMES`] it stays true for the connection, so a wait ends at its bound.
+    pub fn frames_loading(&self) -> bool {
+        self.loading_unknown || !self.loading_frames.is_empty()
+    }
+
+    /// Drop the queued openings of questions (`confirm`, `prompt`), keeping every other event in
+    /// order. Before an answer, the only one queued is the question being answered, already
+    /// reported; read again afterwards it would look like something the page asked after.
+    pub fn forget_queued_questions(&mut self) {
+        self.events.retain(|v| !(v.get("method").and_then(Value::as_str) == Some(DIALOG_OPENING) && !is_notice(&v["params"])));
+    }
+
+    /// Whether an answer was sent and its outcome isn't known yet: the next
+    /// [`Self::answer_dialog`] reads it instead of sending another.
+    pub fn answer_unconfirmed(&self) -> bool {
+        self.unsettled.is_some()
+    }
+
+    /// Whether the connection can still carry commands: false once the browser closed it or a
+    /// write or read on it failed. A call that only ran out of time leaves it open.
+    pub fn connected(&self) -> bool {
+        !self.conn.closed
+    }
+
+    /// Answer the question the page is waiting on with `Page.handleJavaScriptDialog` params
+    /// (`accept`, and `promptText` for a prompt). The browser's refusal (it says no dialog is
+    /// showing) is [`DialogAnswer::NotShowing`]; an error is a call that couldn't tell, such as
+    /// one out of time or on a lost connection, and [`Self::waiting_dialog`] still says what's held.
+    /// A new question the page asks before the reply means this one was answered. While an
+    /// earlier answer's outcome is unknown ([`Unsettled`]), nothing is sent: its outcome is read
+    /// and returned instead ([`DialogAnswer::AnsweredBefore`] or [`DialogAnswer::NotShowing`]).
+    pub fn answer_dialog(&mut self, answer: Value, dl: &Deadline) -> Result<DialogAnswer, ToolError> {
+        if self.unsettled.is_some() {
+            return self.settle_earlier_answer(dl);
+        }
+        let asked_before = self.questions;
+        match self.request("Page.handleJavaScriptDialog", answer, None, dl) {
+            Ok(Ok(_)) => Ok(DialogAnswer::Answered),
+            Ok(Err(refused)) => Ok(DialogAnswer::NotShowing(refused)),
+            Err(_) if self.questions != asked_before => Ok(DialogAnswer::Answered),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Read until the [`Unsettled`] answer's outcome is known: its reply, or a new question.
+    fn settle_earlier_answer(&mut self, dl: &Deadline) -> Result<DialogAnswer, ToolError> {
+        loop {
+            let Some(u) = &mut self.unsettled else { return Ok(DialogAnswer::AnsweredBefore { accept: None }) };
+            let accept = u.accept;
+            if let Some(reply) = u.reply.take() {
+                self.unsettled = None;
+                return Ok(match reply {
+                    Ok(()) => DialogAnswer::AnsweredBefore { accept },
+                    Err(refused) => DialogAnswer::NotShowing(refused),
+                });
+            }
+            if self.questions != u.asked_before {
+                self.unsettled = None;
+                return Ok(DialogAnswer::AnsweredBefore { accept });
+            }
+            let raw = match self.conn.read_message(dl) {
+                Ok(Some(raw)) => raw,
+                Ok(None) => return Err(ToolError::new(ErrorCode::EngineMissing, "the browser closed the connection before confirming the earlier answer")),
+                Err(e) => {
+                    return Err(ToolError::new(e.code, format!("the browser hasn't confirmed the earlier answer yet, so no other was sent: {}", e.message)));
+                }
+            };
+            let v: Value =
+                serde_json::from_slice(&raw).map_err(|e| ToolError::new(ErrorCode::GarbledOutput, format!("the browser sent malformed JSON: {e}")))?;
+            self.on_message(v);
+        }
+    }
+
+    /// An event, or a reply to a command no call is waiting for: the one that settles an
+    /// [`Unsettled`] answer is kept, any other is skipped.
+    fn on_message(&mut self, v: Value) {
+        if v.get("method").is_some() {
+            self.on_event(v);
+            return;
+        }
+        let Some(u) = &mut self.unsettled else { return };
+        if v.get("id").and_then(Value::as_u64) != Some(u.id) || u.reply.is_some() {
+            return;
+        }
+        u.reply = Some(match v.get("error") {
+            Some(err) => {
+                let m = err.get("message").and_then(Value::as_str).unwrap_or("unknown error");
+                Err(cdp_error("Page.handleJavaScriptDialog", m).with_details(json!({"error": err})))
+            }
+            None => Ok(()),
+        });
+        // Taken, and the page hasn't asked anything since: the question it answered is gone.
+        if v.get("error").is_none() && self.questions == u.asked_before {
+            self.waiting = None;
+        }
+    }
+
     /// Keep an event, answering it first when it's a dialog this client answers.
     fn on_event(&mut self, v: Value) {
-        if self.answer_dialogs && v.get("method").and_then(Value::as_str) == Some(DIALOG_OPENING) {
+        match v.get("method").and_then(Value::as_str) {
+            Some(DIALOG_CLOSED) => self.waiting = None,
+            // Each frame's own stop (or its removal) ends its load: the root document's load event
+            // doesn't, since an iframe can still be loading then.
+            Some("Page.frameStartedLoading") => {
+                let id = v["params"]["frameId"].as_str().unwrap_or_default();
+                if self.loading_frames.len() < MAX_LOADING_FRAMES {
+                    self.loading_frames.insert(id.to_string());
+                } else if !self.loading_frames.contains(id) {
+                    self.loading_unknown = true;
+                }
+            }
+            Some("Page.frameStoppedLoading" | "Page.frameDetached") => {
+                self.loading_frames.remove(v["params"]["frameId"].as_str().unwrap_or_default());
+            }
+            Some(DIALOG_OPENING) if self.dialogs == Dialogs::Notices && !is_notice(&v["params"]) => {
+                self.waiting = Some(v["params"].clone());
+                self.questions = self.questions.wrapping_add(1);
+            }
+            _ => {}
+        }
+        let answers = match self.dialogs {
+            Dialogs::Left => false,
+            Dialogs::Notices => is_notice(&v["params"]),
+            Dialogs::All => true,
+        };
+        if answers && v.get("method").and_then(Value::as_str) == Some(DIALOG_OPENING) {
             let id = self.next_id;
             self.next_id = self.next_id.wrapping_add(1);
             let mut msg = json!({"id": id, "method": "Page.handleJavaScriptDialog", "params": dialog_answer(&v["params"])});
@@ -653,8 +890,22 @@ impl CdpClient {
 
     /// Send a command and wait for its reply, dispatching any events seen meanwhile into the queue.
     pub fn call(&mut self, method: &str, params: Value, session_id: Option<&str>, dl: &Deadline) -> Result<Value, ToolError> {
+        self.request(method, params, session_id, dl)?
+    }
+
+    /// [`Self::call`], keeping the browser's own error reply (inner) apart from a call that got no
+    /// reply (outer: refused, out of time, a lost connection or a question that stopped it).
+    fn request(&mut self, method: &str, params: Value, session_id: Option<&str>, dl: &Deadline) -> Result<Result<Value, ToolError>, ToolError> {
+        // A page waiting on a question doesn't run anything else; only the answer gets through.
+        if method != "Page.handleJavaScriptDialog"
+            && let Some(d) = &self.waiting
+        {
+            return Err(dialog_waiting(d));
+        }
+        let asked_before = self.questions;
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
+        let accept = params.get("accept").and_then(Value::as_bool);
         let mut msg = json!({"id": id, "method": method, "params": params});
         if let Some(s) = session_id
             && let Some(o) = msg.as_object_mut()
@@ -663,6 +914,16 @@ impl CdpClient {
         }
         let text = serde_json::to_string(&msg).map_err(|e| ToolError::internal(e.to_string()))?;
         self.conn.send_text(&text, dl)?;
+        let r = self.await_reply(id, method, asked_before, dl);
+        // Sent, with no word back and no new question: what it did is read before another is sent.
+        if method == "Page.handleJavaScriptDialog" && r.is_err() && self.questions == asked_before {
+            self.unsettled = Some(Unsettled { id, asked_before, reply: None, accept });
+        }
+        r
+    }
+
+    /// Wait for the reply to request `id`, keeping the events that arrive meanwhile.
+    fn await_reply(&mut self, id: u64, method: &str, asked_before: u64, dl: &Deadline) -> Result<Result<Value, ToolError>, ToolError> {
         loop {
             let raw = match self.conn.read_message(dl)? {
                 Some(r) => r,
@@ -675,19 +936,29 @@ impl CdpClient {
             if v.get("id").and_then(Value::as_u64) == Some(id) {
                 if let Some(err) = v.get("error") {
                     let m = err.get("message").and_then(Value::as_str).unwrap_or("unknown error");
-                    return Err(cdp_error(method, m).with_details(json!({"error": err})));
+                    return Ok(Err(cdp_error(method, m).with_details(json!({"error": err}))));
                 }
-                return Ok(v.get("result").cloned().unwrap_or(Value::Null));
+                // Answered: the page goes on, even before its closed event arrives.
+                if method == "Page.handleJavaScriptDialog" {
+                    self.waiting = None;
+                }
+                return Ok(Ok(v.get("result").cloned().unwrap_or(Value::Null)));
             }
-            // Anything else is an event or a reply to a different id: keep events, ignore stray replies.
-            if v.get("method").is_some() {
-                self.on_event(v);
+            // Anything else is an event or a reply to a different id (on_message).
+            self.on_message(v);
+            // Only a question asked during this call stops it: the answer to the one already
+            // held waits for its own reply.
+            if self.questions != asked_before
+                && let Some(d) = &self.waiting
+            {
+                return Err(dialog_waiting(d));
             }
         }
     }
 
     /// Pump incoming messages until the deadline passes, collecting events. Replies to prior
-    /// commands are ignored. Used by observation windows.
+    /// commands are ignored, except the one an [`Unsettled`] answer waits for. Used by
+    /// observation windows.
     pub fn pump_until(&mut self, until: &Deadline) -> Result<(), ToolError> {
         loop {
             if until.expired() {
@@ -695,10 +966,8 @@ impl CdpClient {
             }
             match self.conn.read_message(until) {
                 Ok(Some(raw)) => {
-                    if let Ok(v) = serde_json::from_slice::<Value>(&raw)
-                        && v.get("method").is_some()
-                    {
-                        self.on_event(v);
+                    if let Ok(v) = serde_json::from_slice::<Value>(&raw) {
+                        self.on_message(v);
                     }
                 }
                 Ok(None) => return Ok(()),
@@ -724,6 +993,16 @@ impl CdpClient {
     pub fn close(&mut self, dl: &Deadline) {
         self.conn.close(dl);
     }
+}
+
+/// The error for a call the page can't answer because it's waiting on a `confirm` or `prompt`.
+fn dialog_waiting(opening: &Value) -> ToolError {
+    let kind = opening.get("type").and_then(Value::as_str).unwrap_or("dialog");
+    let message = opening.get("message").and_then(Value::as_str).unwrap_or_default();
+    let first = message.lines().next().unwrap_or_default().chars().take(300).collect::<String>();
+    ToolError::new(ErrorCode::ProgramFailed, format!("the page is waiting for an answer to its {kind} (\"{first}\")"))
+        .with_remediation("Answer the page's question first; nothing else runs in the page until it's answered.")
+        .with_details(json!({ DIALOG_DETAIL: opening }))
 }
 
 fn cdp_error(method: &str, message: &str) -> ToolError {
@@ -807,5 +1086,210 @@ mod tests {
         assert_eq!(answer(json!("prompt")), json!(false));
         assert_eq!(answer(json!("something-new")), json!(false), "an unknown kind is dismissed");
         assert_eq!(answer(Value::Null), json!(false));
+    }
+
+    /// A stand-in page over a real WebSocket: `script` runs on the server side of the connection.
+    fn stand_in(script: impl FnOnce(&mut TcpStream) + Send + 'static) -> CdpClient {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut head = Vec::new();
+            let mut b = [0u8; 1];
+            while find(&head, b"\r\n\r\n").is_none() && s.read(&mut b).unwrap_or(0) == 1 {
+                head.push(b[0]);
+            }
+            let text = String::from_utf8_lossy(&head).into_owned();
+            let key = text.lines().find_map(|l| l.strip_prefix("Sec-WebSocket-Key: ")).unwrap_or_default().trim().to_string();
+            let reply = format!(
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+                expected_accept(&key)
+            );
+            s.write_all(reply.as_bytes()).unwrap();
+            script(&mut s);
+        });
+        let ep = parse_endpoint(&format!("http://127.0.0.1:{port}")).unwrap();
+        let target = ws_target(&format!("ws://127.0.0.1:{port}/devtools/page/P"), &ep).unwrap();
+        CdpClient::new(WsConn::connect(&target, 1 << 20, &Deadline::new(Duration::from_secs(5), CancelToken::default())).unwrap())
+    }
+
+    /// Send one unmasked text frame, as a browser does.
+    fn send(s: &mut TcpStream, v: Value) {
+        let body = v.to_string().into_bytes();
+        let mut frame = vec![0x81u8];
+        if body.len() < 126 {
+            frame.push(body.len() as u8);
+        } else {
+            frame.push(126);
+            frame.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        }
+        frame.extend_from_slice(&body);
+        s.write_all(&frame).unwrap();
+    }
+
+    /// Read one masked client frame's JSON.
+    fn receive(s: &mut TcpStream) -> Value {
+        let mut h = [0u8; 2];
+        s.read_exact(&mut h).unwrap();
+        let mut len = usize::from(h[1] & 0x7f);
+        if len == 126 {
+            let mut l = [0u8; 2];
+            s.read_exact(&mut l).unwrap();
+            len = usize::from(u16::from_be_bytes(l));
+        }
+        let mut mask = [0u8; 4];
+        s.read_exact(&mut mask).unwrap();
+        let mut body = vec![0u8; len];
+        s.read_exact(&mut body).unwrap();
+        for (i, byte) in body.iter_mut().enumerate() {
+            *byte ^= mask[i % 4];
+        }
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[test]
+    fn an_answer_waits_for_its_reply_and_a_new_question_stops_a_call() {
+        let mut client = stand_in(|s| {
+            send(s, json!({"method": DIALOG_OPENING, "params": {"type": "confirm", "message": "Continue?"}}));
+            // The answer: an unrelated event comes first, then its reply.
+            let answer = receive(s);
+            assert_eq!(answer["method"], "Page.handleJavaScriptDialog");
+            send(s, json!({"method": "Network.requestWillBeSent", "params": {"requestId": "1"}}));
+            send(s, json!({"id": answer["id"], "result": {}}));
+            // A call the page interrupts with a new question gets no reply.
+            let _evaluate = receive(s);
+            send(s, json!({"method": DIALOG_OPENING, "params": {"type": "prompt", "message": "Your team?", "defaultPrompt": "Sales"}}));
+            let _ = receive(s);
+        })
+        .answering_notices();
+        let dl = Deadline::new(Duration::from_secs(5), CancelToken::default());
+        client.pump_until(&Deadline::new(Duration::from_millis(300), CancelToken::default())).unwrap();
+        assert_eq!(client.waiting_dialog().map(|d| d["type"].clone()), Some(json!("confirm")), "the question is held, not answered");
+        let refused = client.call("Runtime.evaluate", json!({}), None, &dl).unwrap_err();
+        assert!(refused.message.contains("waiting for an answer"), "nothing else runs meanwhile: {}", refused.message);
+        client.call("Page.handleJavaScriptDialog", json!({"accept": true}), None, &dl).unwrap();
+        assert!(client.waiting_dialog().is_none(), "answered");
+        let started = Instant::now();
+        let stopped = client.call("Runtime.evaluate", json!({}), None, &dl).unwrap_err();
+        assert_eq!(stopped.details.as_ref().map(|d| d[DIALOG_DETAIL]["type"].clone()), Some(json!("prompt")));
+        assert!(started.elapsed() < Duration::from_secs(2), "at once, not at the deadline");
+    }
+
+    /// An answer tells a refusal (no dialog showing) apart from a call that couldn't tell: one out
+    /// of time keeps the question and the connection, and a retry reads what that answer did
+    /// instead of sending another, which would land on the question asked since. A lost
+    /// connection says so.
+    #[test]
+    fn an_answer_tells_a_refusal_from_no_word() {
+        // The late reply is released only once the first call has timed out.
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let mut client = stand_in(move |s| {
+            send(s, json!({"method": DIALOG_OPENING, "params": {"type": "confirm", "message": "Continue?"}}));
+            // The first answer is taken late, after its call ran out of time, and the page asks next.
+            let first = receive(s);
+            assert_eq!(first["params"]["accept"], true);
+            released.recv_timeout(Duration::from_secs(10)).unwrap();
+            send(s, json!({"id": first["id"], "result": {}}));
+            send(s, json!({"method": DIALOG_OPENING, "params": {"type": "prompt", "message": "Your team?", "defaultPrompt": ""}}));
+            // The retry sent nothing: the next answer to arrive is the one given to the prompt,
+            // and it's refused (the page closed the prompt itself).
+            let next = receive(s);
+            assert_eq!(next["params"], json!({"accept": true, "promptText": "Design"}), "the retry's answer never reached the prompt: {next}");
+            send(s, json!({"id": next["id"], "error": {"code": -32000, "message": "No dialog is showing"}}));
+            // Then the browser goes away.
+        })
+        .answering_notices();
+        let dl = Deadline::new(Duration::from_secs(5), CancelToken::default());
+        client.pump_until(&Deadline::new(Duration::from_millis(300), CancelToken::default())).unwrap();
+        let short = Deadline::new(Duration::from_millis(300), CancelToken::default());
+        let late = client.answer_dialog(json!({"accept": true}), &short).unwrap_err();
+        assert_eq!(late.code, ErrorCode::TimedOut, "{late:?}");
+        assert!(client.connected() && client.waiting_dialog().is_some(), "the question and its connection are kept for another try");
+        release.send(()).unwrap();
+        // The retry's own choice differs: what's reported is the answer the page took.
+        assert!(
+            matches!(client.answer_dialog(json!({"accept": false}), &dl), Ok(DialogAnswer::AnsweredBefore { accept: Some(true) })),
+            "the late answer was taken"
+        );
+        // Its reply came first; the question after it arrives next.
+        client.pump_until(&Deadline::new(Duration::from_millis(300), CancelToken::default())).unwrap();
+        assert_eq!(client.waiting_dialog().map(|d| d["type"].clone()), Some(json!("prompt")), "the next question is held");
+        match client.answer_dialog(json!({"accept": true, "promptText": "Design"}), &dl) {
+            Ok(DialogAnswer::NotShowing(e)) => assert!(e.message.contains("No dialog is showing"), "{}", e.message),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        let lost = client.answer_dialog(json!({"accept": false}), &dl).unwrap_err();
+        assert_eq!(lost.code, ErrorCode::EngineMissing, "{lost:?}");
+        assert!(!client.connected(), "a lost connection can't be held");
+    }
+
+    /// A late reply that refuses the earlier answer means the question was already gone.
+    #[test]
+    fn a_late_refusal_settles_an_earlier_answer() {
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let mut client = stand_in(move |s| {
+            send(s, json!({"method": DIALOG_OPENING, "params": {"type": "confirm", "message": "Continue?"}}));
+            let first = receive(s);
+            released.recv_timeout(Duration::from_secs(10)).unwrap();
+            send(s, json!({"id": first["id"], "error": {"code": -32000, "message": "No dialog is showing"}}));
+            // Nothing else is sent to the page.
+            let _ = receive(s);
+        })
+        .answering_notices();
+        let dl = Deadline::new(Duration::from_secs(5), CancelToken::default());
+        client.pump_until(&Deadline::new(Duration::from_millis(300), CancelToken::default())).unwrap();
+        let short = Deadline::new(Duration::from_millis(300), CancelToken::default());
+        assert_eq!(client.answer_dialog(json!({"accept": true}), &short).unwrap_err().code, ErrorCode::TimedOut);
+        release.send(()).unwrap();
+        match client.answer_dialog(json!({"accept": false}), &dl) {
+            Ok(DialogAnswer::NotShowing(e)) => assert!(e.message.contains("No dialog is showing"), "{}", e.message),
+            other => panic!("expected the earlier answer's refusal, got {other:?}"),
+        }
+    }
+
+    /// Past the frame cap, a dropped start leaves the load unknown: still loading, never idle.
+    #[test]
+    fn frames_past_the_cap_keep_the_page_loading() {
+        let mut client = stand_in(|s| {
+            for i in 0..=MAX_LOADING_FRAMES {
+                send(s, json!({"method": "Page.frameStartedLoading", "params": {"frameId": format!("f{i}")}}));
+            }
+            for i in 0..MAX_LOADING_FRAMES {
+                send(s, json!({"method": "Page.frameStoppedLoading", "params": {"frameId": format!("f{i}")}}));
+            }
+            probe_reply(s);
+        });
+        // The probe's reply comes after every event, so all of them have been read.
+        let dl = Deadline::new(Duration::from_secs(5), CancelToken::default());
+        client.call("Probe.read", json!({}), None, &dl).unwrap();
+        assert!(client.loading_frames.is_empty(), "every tracked frame stopped, so only the dropped start keeps it loading");
+        assert!(client.frames_loading(), "the frame past the cap may still be loading");
+        let mut few = stand_in(|s| {
+            send(s, json!({"method": "Page.frameStartedLoading", "params": {"frameId": "F"}}));
+            probe_reply(s);
+            send(s, json!({"method": "Page.frameStoppedLoading", "params": {"frameId": "F"}}));
+            probe_reply(s);
+        });
+        few.call("Probe.read", json!({}), None, &dl).unwrap();
+        assert!(few.frames_loading(), "the start was read");
+        few.call("Probe.read", json!({}), None, &dl).unwrap();
+        assert!(!few.frames_loading(), "every tracked frame stopped");
+    }
+
+    /// Reply to the client's next command, after the events sent before it.
+    fn probe_reply(s: &mut TcpStream) {
+        let m = receive(s);
+        send(s, json!({"id": m["id"], "result": {}}));
+    }
+
+    #[test]
+    fn only_a_notice_is_answered_without_asking() {
+        let is = |kind: &str| is_notice(&json!({"type": kind}));
+        assert!(is("alert") && is("beforeunload"));
+        assert!(!is("confirm") && !is("prompt") && !is("something-new") && !is_notice(&Value::Null));
+        let e = dialog_waiting(&json!({"type": "confirm", "message": "Continue to the new version?\nmore", "defaultPrompt": ""}));
+        assert_eq!(e.message, "the page is waiting for an answer to its confirm (\"Continue to the new version?\")");
+        assert_eq!(e.details.as_ref().and_then(|d| d[DIALOG_DETAIL]["type"].as_str()), Some("confirm"), "the question travels with the error");
     }
 }

@@ -3685,6 +3685,13 @@ Owner: open · Status: in progress
       declared secrets redacted where the tool has hidden values. Fake-CDP regressions cover all
       four
       — claimed: AlexJoaquimPereira, branch bugfix/r3.13-remaining-page-dialogs
+- [x] Let the agent answer a page's `confirm` or `prompt` (#2018): `web_site_open` and
+      `web_site_capture` report the question instead of dismissing it, and a new
+      `web_page_dialog_answer` answers it. — claimed: htcom-code, branch feature/r3.13-page-dialog-answer
+- [ ] A question a page asks while no Craft Anything connection is attached (a resize handler run
+      when the last tool's viewport override ends) can't be answered: Chrome tells a new connection
+      there's no dialog and doesn't reply to its `Page.enable`, so the next tool waits out its
+      deadline. Find a way to answer it, or say so at once (#2018).
 
 ---
 

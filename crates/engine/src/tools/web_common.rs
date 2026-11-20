@@ -232,6 +232,8 @@ impl Browser {
         if let Some(site) = ctx.session.ext.get::<super::website_tools::SiteBrowser>()
             && cdp::json_version(&site.endpoint, dl).is_ok()
         {
+            // While its page waits on a question, nothing in it answers: say so instead of waiting.
+            super::website_tools::refuse_if_waiting(&site)?;
             return Ok(Browser::attached(&site.endpoint, &site.product, &site.version));
         }
         if !opts.allow_launch {

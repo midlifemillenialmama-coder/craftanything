@@ -1253,6 +1253,104 @@ fn asking_an_ai_that_is_turned_off_says_so_instead_of_looking_alone() {
     assert!(!add, "an AI is set up, so there is nothing to add");
 }
 
+fn disabled_chat_app(mode: Mode) -> CraftApp {
+    let mut app = demo::app(demo::engine(mode, true));
+    demo::deep(&mut app);
+    for (name, enabled) in [("Chat off", false), ("Chat ready", true), ("Other off", false)] {
+        app.hub
+            .add_backend(
+                BackendConfig {
+                    name: name.into(),
+                    kind: BackendKind::OpenaiCompatible,
+                    model: "example-model".into(),
+                    base_url: Some("http://127.0.0.1:9/v1".into()),
+                    ssh_host: None,
+                    enabled,
+                },
+                None,
+            )
+            .unwrap();
+    }
+    app.backends = app.hub.backends();
+    app.state.backend = Some("Chat off".into());
+    app.state.input = "Keep this question while I choose an AI".into();
+    app.state.screen = if mode == Mode::Beginner { Screen::Ask } else { Screen::Workbench };
+    app
+}
+
+#[test]
+fn disabled_chat_recovery_can_turn_on_the_saved_ai_without_sending_the_draft() {
+    for mode in [Mode::Beginner, Mode::Experienced] {
+        let mut h = harness(move || disabled_chat_app(mode));
+        h.run_steps(4);
+        h.get_by_label("Chat off is turned off. Turn it on or choose another AI.");
+        assert!(h.query_by_label("Send (Enter)").is_none());
+        h.get_by_label("Ask a question").click();
+        h.run_steps(2);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        assert_eq!(h.state().state.input, "Keep this question while I choose an AI");
+        assert!(h.state().state.chat.is_empty());
+
+        h.get_by_label("Turn on").click();
+        assert!(wait(&mut h, |app| app.backends.iter().any(|b| b.name == "Chat off" && b.enabled)));
+        h.run_steps(3);
+        assert!(h.state().hub.backends().iter().any(|b| b.name == "Chat off" && b.enabled));
+        assert_eq!(h.state().state.backend.as_deref(), Some("Chat off"));
+        assert_eq!(h.state().state.input, "Keep this question while I choose an AI");
+        assert!(h.state().state.chat.is_empty(), "turning on does not send a model request");
+        assert!(h.query_by_value("Choose another AI").is_none());
+        h.get_by_label("Send (Enter)");
+    }
+}
+
+#[test]
+fn disabled_chat_recovery_offers_enabled_choices_and_keeps_the_question() {
+    let mut h = harness(|| disabled_chat_app(Mode::Beginner));
+    h.run_steps(4);
+    h.get_by_value("Choose another AI").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Other off").is_none(), "the recovery menu only offers enabled AIs");
+    h.get_by_label("Chat ready").click();
+    h.run_steps(3);
+    assert_eq!(h.state().state.backend.as_deref(), Some("Chat ready"));
+    assert_eq!(h.state().state.input, "Keep this question while I choose an AI");
+    assert!(!h.state().hub.backends().iter().find(|b| b.name == "Chat off").unwrap().enabled);
+    assert!(h.state().state.chat.is_empty());
+    assert!(h.query_by_label("Turn on").is_none());
+    h.get_by_label("Send (Enter)");
+}
+
+#[test]
+fn disabled_chat_recovery_can_choose_the_builtin_engines() {
+    let mut h = harness(|| disabled_chat_app(Mode::Beginner));
+    h.run_steps(4);
+    h.get_by_value("Choose another AI").click();
+    h.run_steps(2);
+    h.get_by_label("No AI (built-in engines only)").click();
+    h.run_steps(3);
+    assert!(h.state().state.backend.is_none());
+    assert_eq!(h.state().state.input, "Keep this question while I choose an AI");
+    assert!(h.state().state.chat.is_empty());
+    assert!(h.query_by_label("Turn on").is_none());
+    h.get_by_label("Send (Enter)");
+}
+
+#[test]
+fn enabled_chat_and_builtin_engines_do_not_offer_recovery() {
+    for selected in [Some("Chat ready".to_string()), None] {
+        let mut h = harness(move || {
+            let mut app = disabled_chat_app(Mode::Beginner);
+            app.state.backend = selected;
+            app
+        });
+        h.run_steps(4);
+        assert!(h.query_by_value("Choose another AI").is_none());
+        assert!(h.query_by_label("Turn on").is_none());
+        h.get_by_label("Send (Enter)");
+    }
+}
+
 #[test]
 fn opening_a_file_lands_on_ask_with_a_first_look() {
     let dir = tempfile::tempdir().unwrap();

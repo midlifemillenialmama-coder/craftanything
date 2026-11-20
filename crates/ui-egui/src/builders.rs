@@ -172,13 +172,13 @@ impl CraftApp {
         }
     }
 
-    /// Turn an AI on or off in Settings → AI (it keeps its key).
-    pub fn set_backend_enabled(&mut self, name: &str, on: bool) {
+    /// Turn an AI on or off (it keeps its key), returning the background job id.
+    pub fn set_backend_enabled(&mut self, name: &str, on: bool) -> u64 {
         let (hub, name) = (self.hub.clone(), name.to_string());
         self.jobs.spawn(if on { tr("Turn on an AI") } else { tr("Turn off an AI") }, false, move |_| {
             hub.set_enabled(&name, on).map_err(|e| e.message)?;
             Ok(crate::backends(&hub))
-        });
+        })
     }
 
     /// Ask an AI which models it can use, for Settings → AI's model picker.

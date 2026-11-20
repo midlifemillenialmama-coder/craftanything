@@ -1762,8 +1762,11 @@ Gaps found while using the app for real projects.
       second side cannot leave a half-started comparison; a CLI regression covers `chat --backend`
       with a turned-off agent
       — claimed: AlexJoaquimPereira, branch `bugfix/r5.5-chat-turned-off-backend`
-- [ ] The app's chat keeps a turned-off AI as its saved choice and refuses every send; offer to
-      turn it on or choose another enabled AI
+- [x] Ask and the Experienced agent console offer to turn a saved, turned-off AI on or choose
+      another enabled AI (or the built-in engines), through the existing headless actions.
+      The question stays in the prompt box until the person sends it after recovery; Enter
+      does not discard it while the selected AI is off.
+      — claimed: Afloat16, branch bugfix/r2.9-disabled-chat-recovery
 - [x] Ctrl+V (Shift+Insert, Cmd+V) in a prompt box that takes pictures pastes a copied image (saved
       as a PNG) or copied picture files; attachments show as square picture tiles, the whole
       picture on hover, decoded on a worker

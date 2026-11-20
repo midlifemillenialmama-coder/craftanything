@@ -16,8 +16,9 @@ use std::time::Duration;
 
 #[derive(Debug, Args)]
 pub struct RebuildArgs {
-    /// A web address, an absolute path to an app, game or file, or `-` for none. A folder that
-    /// already holds a project keeps its saved target.
+    /// A web address, `adb:<serial>/<package>` for an app on a phone or TV, an absolute path to
+    /// an app, game or file, or `-` for none. A folder that already holds a project keeps its
+    /// saved target.
     pub target: String,
     /// What to make, in your words; a folder that already holds a project gets it as a follow-up.
     pub request: String,

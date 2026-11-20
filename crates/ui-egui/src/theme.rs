@@ -267,8 +267,17 @@ pub fn install_fonts(ctx: &egui::Context) {
         }
     }
     // Sans first: a mincho/serif fallback makes Japanese and Chinese UI text look like prose.
-    let fallbacks = sans_first(fallbacks);
+    let mut fallbacks = sans_first(fallbacks);
     let bold_fallbacks = sans_first(bold_fallbacks);
+    // For local desktop builds without CRAFT_FONTS_DIR, load a system Hebrew fallback font when
+    // craft-fonts did not embed one, so Hebrew text renders instead of tofu.
+    #[cfg(not(target_arch = "wasm32"))]
+    if !CRAFT_FONTS.iter().any(|f| f.scripts.contains(&"Hebr"))
+        && let Some(bytes) = desktop_hebrew_fallback()
+    {
+        fonts.font_data.insert("system:hebrew".to_owned(), Arc::new(FontData::from_owned(bytes)));
+        fallbacks.push("system:hebrew".to_owned());
+    }
     fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "Figtree".to_owned());
     fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "JetBrainsMono".to_owned());
     for fam in [FontFamily::Proportional, FontFamily::Monospace] {
@@ -279,6 +288,22 @@ pub fn install_fonts(ctx: &egui::Context) {
         fonts.families.insert(fam, stack);
     }
     ctx.set_fonts(fonts);
+}
+
+/// Probes common system font paths for a Hebrew fallback face on desktop builds.
+#[cfg(not(target_arch = "wasm32"))]
+fn desktop_hebrew_fallback() -> Option<Vec<u8>> {
+    const CANDIDATES: &[&str] = &[
+        "/System/Library/Fonts/SFHebrew.ttf",
+        "/System/Library/Fonts/Supplemental/ArialHB.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansHebrew-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSansHebrew-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        r"C:\Windows\Fonts\segoeui.ttf",
+        r"C:\Windows\Fonts\arial.ttf",
+    ];
+    CANDIDATES.iter().find_map(|p| std::fs::read(p).ok().filter(|b| !b.is_empty()))
 }
 
 /// The medium and semibold families: Figtree's own weight first, then a script's bold face from
@@ -920,6 +945,23 @@ mod tests {
                 }
                 assert!(ctx.fonts_mut(|f| f.has_glyphs(&font, text)), "{script} ({text}) shows as boxes in {font:?}");
             }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn desktop_hebrew_fallback_covers_hebrew_when_present() {
+        if CRAFT_FONTS.iter().any(|f| f.scripts.contains(&"Hebr")) {
+            return;
+        }
+        if super::desktop_hebrew_fallback().is_none() {
+            return;
+        }
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
+        for font in [FontId::proportional(14.0), FontId::monospace(14.0), medium(14.0), semibold(14.0)] {
+            assert!(ctx.fonts_mut(|f| f.has_glyphs(&font, "שלום עולם")), "Hebrew fallback missing in {font:?}");
         }
     }
 

@@ -276,7 +276,12 @@ pub fn pin_modal(app: &mut CraftApp, ui: &mut Ui, close: &mut bool) {
     ui.set_width(560.0);
     ui.label(theme::heading(tr("Pin this build"), theme::SECTION));
     ui.add_space(theme::space::XS);
-    ui.add(egui::Label::new(RichText::new(tr("Keep it in the sidebar to open any time, whatever later builds change.")).color(t.text_dim)).wrap());
+    crate::i18n::wrapped_label(
+        ui,
+        &crate::i18n::tr_logical("Keep it in the sidebar to open any time, whatever later builds change."),
+        egui::TextStyle::Body.resolve(ui.style()),
+        |r| r.color(t.text_dim),
+    );
     ui.add_space(theme::space::MD);
     let size = Vec2::new(268.0, 150.0);
     let mode = app.state.pin_draft.mode;
@@ -306,19 +311,19 @@ pub fn pin_modal(app: &mut CraftApp, ui: &mut Ui, close: &mut bool) {
     });
     ui.add_space(theme::space::SM);
     let (note, color) = match &app.state.pin_draft.size {
-        None => (tr("Working out how much space a copy takes…"), t.text_faint),
+        None => (crate::i18n::tr_logical("Working out how much space a copy takes…"), t.text_faint),
         Some(Err(e)) => (e.clone(), t.danger),
         Some(Ok((frozen, light))) => {
             let sizes = [("size", megabytes(*frozen)), ("light", megabytes(*light))];
             let sizes = sizes.each_ref().map(|(k, v)| (*k, v.as_str()));
             if *frozen >= BIG_COPY && mode == PinMode::Frozen {
-                (trf("A frozen copy takes {size}. That's a lot of space: a light copy takes {light}.", &sizes), t.warning)
+                (crate::i18n::trf_logical("A frozen copy takes {size}. That's a lot of space: a light copy takes {light}.", &sizes), t.warning)
             } else {
-                (trf("A frozen copy takes {size}; a light copy takes {light}.", &sizes), t.text_dim)
+                (crate::i18n::trf_logical("A frozen copy takes {size}; a light copy takes {light}.", &sizes), t.text_dim)
             }
         }
     };
-    ui.add(egui::Label::new(RichText::new(note).color(color).size(theme::SMALL).line_height(Some(theme::leading(theme::SMALL)))).wrap());
+    crate::i18n::wrapped_label(ui, &note, egui::FontId::proportional(theme::SMALL), |r| r.color(color).line_height(Some(theme::leading(theme::SMALL))));
     ui.add_space(theme::space::MD);
     widgets::caption(ui, "Name (optional)");
     let r = ui.add(
@@ -378,11 +383,11 @@ pub fn delete_modal(app: &mut CraftApp, ui: &mut Ui, project: &Path, id: u32, cl
     ui.add_space(theme::space::SM);
     // A copy may hold what the program saved; say so, since it can't be brought back.
     let what = if row.pin.mode.keeps_copy() {
-        tr("Its copy is deleted, with anything it saved there. The project itself stays as it is.")
+        crate::i18n::tr_logical("Its copy is deleted, with anything it saved there. The project itself stays as it is.")
     } else {
-        tr("Only the pin goes; the project and its app stay as they are.")
+        crate::i18n::tr_logical("Only the pin goes; the project and its app stay as they are.")
     };
-    ui.add(egui::Label::new(RichText::new(what).color(t.text_dim)).wrap());
+    crate::i18n::wrapped_label(ui, &what, egui::TextStyle::Body.resolve(ui.style()), |r| r.color(t.text_dim));
     if row.pin.mode.keeps_copy() {
         ui.add_space(theme::space::XS);
         ui.label(RichText::new(tr("This can't be undone.")).color(t.danger).size(theme::SMALL));

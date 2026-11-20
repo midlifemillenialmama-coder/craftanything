@@ -40,7 +40,7 @@ impl<'ast> Visit<'ast> for Lookups {
             let name = path.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
             let owner = path.path.segments.iter().rev().nth(1).map(|s| s.ident.to_string()).unwrap_or_default();
             let positions: &[usize] = match (owner.as_str(), name.as_str()) {
-                (_, "tr" | "trf") => &[0],
+                (_, "tr" | "trf" | "tr_logical" | "trf_logical") => &[0],
                 ("widgets", "primary" | "link" | "suggestion" | "caption" | "pill" | "working" | "working_since" | "segmented" | "segmented_sized") => &[1],
                 ("widgets", "named") => &[1],
                 ("widgets", "primary_icon" | "primary_sized" | "secondary") => &[2],
@@ -96,7 +96,7 @@ pub fn check(root: &Path) -> bool {
         return false;
     };
     let mut catalogs = Vec::new();
-    for code in ["zh-hans", "zh-hant", "ru", "ko", "cs", "de", "ka", "es", "it", "vi", "pt-br", "tr", "th", "et"] {
+    for code in ["zh-hans", "zh-hant", "ru", "ko", "cs", "de", "ka", "es", "it", "vi", "pt-br", "tr", "th", "et", "he"] {
         let path = source.join("i18n").join(format!("{code}.tsv"));
         let Ok(text) = std::fs::read_to_string(&path) else {
             eprintln!("i18n: can't read {}", path.display());

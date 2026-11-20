@@ -1,7 +1,7 @@
 //! Command palette (Ctrl/⌘ K): app commands plus every registry tool. Picking a tool opens a
 //! params form generated from its schema.
 
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_logical};
 use crate::state::Screen;
 use crate::theme::{self, Tokens};
 use crate::{CraftApp, Pick, Route, icons, schema_form, widgets};
@@ -81,8 +81,8 @@ pub fn show(app: &mut CraftApp, ctx: &egui::Context) {
         .iter()
         .filter_map(|e| {
             let hay = match e {
-                Entry::App(_, title, _) => tr(title),
-                Entry::Tool { id, title, .. } => format!("{} {title} {id}", tr(title)),
+                Entry::App(_, title, _) => tr_logical(title),
+                Entry::Tool { id, title, .. } => format!("{} {title} {id}", tr_logical(title)),
             };
             score(&hay, &q).map(|s| (s, e))
         })
@@ -317,5 +317,11 @@ mod tests {
         assert!(score("native_sections_list", "lst").is_some());
         assert!(score("native_sections_list", "xyz").is_none());
         assert_eq!(score("anything", ""), Some(0));
+    }
+
+    #[test]
+    fn hebrew_logical_title_matches_logical_query() {
+        let title = crate::i18n::tr_logical_for("he", "Export a report (Markdown)");
+        assert!(score(&title, "ייצוא דוח").is_some(), "expected logical Hebrew query to match {title:?}");
     }
 }

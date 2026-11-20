@@ -2,7 +2,7 @@
 //! window and app items. Every label is in the app's language, and follows it when it changes.
 
 use crate::CraftApp;
-use crate::i18n::{self, tr};
+use crate::i18n::{self, tr_logical};
 use crate::palette::{self, AppCommand};
 use crate::state::Screen;
 use craft_anything_engine::Mode;
@@ -72,7 +72,7 @@ impl MenuBar {
         let mut actions = Vec::new();
         let mut labels = Vec::new();
         let mut item = |label: &'static str, key: Option<Accelerator>, action: Action| {
-            let i = MenuItem::new(tr(label), true, key);
+            let i = MenuItem::new(tr_logical(label), true, key);
             actions.push((i.id().clone(), action));
             labels.push((Label::Item(i.clone()), label));
             i
@@ -90,7 +90,7 @@ impl MenuBar {
         let updates = item("Check for Updates…", None, Action::Updates);
         let report = item("Report a problem…", None, Action::Url(NEW_ISSUE));
         let mut check = |label: &'static str, action: Action| {
-            let i = CheckMenuItem::new(tr(label), true, false, None);
+            let i = CheckMenuItem::new(tr_logical(label), true, false, None);
             actions.push((i.id().clone(), action));
             labels.push((Label::Check(i.clone()), label));
             i
@@ -101,7 +101,7 @@ impl MenuBar {
         let deep = check("Deep", Action::Deep(true));
 
         let mut sub = |label: &'static str| {
-            let s = Submenu::new(tr(label), true);
+            let s = Submenu::new(tr_logical(label), true);
             labels.push((Label::Sub(s.clone()), label));
             s
         };
@@ -113,7 +113,7 @@ impl MenuBar {
         let help = sub("Help");
         // The system's own items, named in the app's language rather than the system's.
         let mut system = |make: fn(Option<&str>) -> PredefinedMenuItem, label: &'static str| {
-            let i = make(Some(&tr(label)));
+            let i = make(Some(&tr_logical(label)));
             labels.push((Label::System(i.clone()), label));
             i
         };
@@ -127,7 +127,7 @@ impl MenuBar {
         let zoom = system(PredefinedMenuItem::maximize, "Zoom");
         let to_front = system(PredefinedMenuItem::bring_all_to_front, "Bring all to front");
         let about_metadata = AboutMetadata { name: Some("Craft Anything".into()), version: Some(env!("CARGO_PKG_VERSION").into()), ..Default::default() };
-        let about = PredefinedMenuItem::about(Some(&tr("About Craft Anything")), Some(about_metadata));
+        let about = PredefinedMenuItem::about(Some(&tr_logical("About Craft Anything")), Some(about_metadata));
         labels.push((Label::System(about.clone()), "About Craft Anything"));
         let sep = PredefinedMenuItem::separator;
         let menu = Menu::new();
@@ -164,7 +164,7 @@ pub fn update(app: &mut CraftApp, ctx: &egui::Context) {
         let language = i18n::language();
         if bar.language != language {
             for (label, text) in &bar.labels {
-                label.set(&tr(text));
+                label.set(&tr_logical(text));
             }
             bar.language = language;
         }

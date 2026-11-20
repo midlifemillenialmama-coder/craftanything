@@ -149,7 +149,7 @@ pub fn modals(app: &mut CraftApp, ctx: &egui::Context) {
                                     theme::semibold(theme::CAPTION),
                                     t.accent_ink,
                                 );
-                                ui.add(egui::Label::new(tr(s)).wrap());
+                                crate::i18n::wrapped_label(ui, &crate::i18n::tr_logical(s), egui::TextStyle::Body.resolve(ui.style()), |r| r);
                             });
                             ui.add_space(theme::space::XS);
                         }

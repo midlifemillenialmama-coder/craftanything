@@ -1559,9 +1559,9 @@ fn continue_card(app: &mut CraftApp, ui: &mut Ui, ws: &Workspace) {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             icons::show(ui, "history", theme::icon::LG, t.accent);
-            ui.add(egui::Label::new(RichText::new(tr(title)).font(theme::semibold(theme::BODY))).wrap());
+            crate::i18n::wrapped_label(ui, &crate::i18n::tr_logical(title), theme::semibold(theme::BODY), |r| r);
         });
-        ui.add(egui::Label::new(RichText::new(tr(body)).color(t.text_dim)).wrap());
+        crate::i18n::wrapped_label(ui, &crate::i18n::tr_logical(body), egui::TextStyle::Body.resolve(ui.style()), |r| r.color(t.text_dim));
         ui.add_space(theme::space::SM);
         ui.horizontal(|ui| {
             go = widgets::primary_icon(ui, Some("play"), "Continue", true).clicked();

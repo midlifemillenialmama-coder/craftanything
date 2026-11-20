@@ -916,8 +916,15 @@ pub fn show(app: &mut CraftApp, ui: &mut Ui) {
         // The feed gets what the prompt box leaves; the box grows with its text, so its height
         // is measured each frame and used on the next.
         let comp_id = ui.id().with("project-composer-h");
+        let text_id = comp_id.with("text-height");
         let comp_h = ui.data(|d| d.get_temp::<f32>(comp_id)).unwrap_or(110.0);
-        let rest = Vec2::new(width, (ui.available_height() - comp_h - chat::COMPOSER_GAP).max(40.0));
+        let text_h = ui.data(|d| d.get_temp::<f32>(text_id)).unwrap_or_default();
+        let height = ui.available_height() - chat::COMPOSER_GAP;
+        let min_feed = 40.0;
+        // Pinned plans, picture tiles and controls share the same height as the draft. Use
+        // their measured height so a draft cannot grow into space they already occupy.
+        let text_limit = height - min_feed - ui.spacing().item_spacing.y - (comp_h - text_h);
+        let rest = Vec2::new(width, (height - comp_h).max(min_feed));
         ui.allocate_ui_with_layout(rest, egui::Layout::top_down(egui::Align::Min), |ui| {
             ui.set_min_height(rest.y);
             egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
@@ -940,8 +947,12 @@ pub fn show(app: &mut CraftApp, ui: &mut Ui) {
         ui.add_space(chat::COMPOSER_GAP);
         let r = ui.horizontal(|ui| {
             ui.add_space(pad);
-            ui.vertical(|ui| composer(app, ui, max_w, &t, waiting.last()));
+            ui.vertical(|ui| composer(app, ui, max_w, &t, waiting.last(), text_limit)).inner
         });
+        ui.data_mut(|d| d.insert_temp(text_id, r.inner));
+        if (text_h - r.inner).abs() > 0.5 {
+            ui.ctx().request_discard("the project draft changed height");
+        }
         chat::remember_composer_height(ui, comp_id, comp_h, r.response.rect.height());
     });
 }
@@ -1803,7 +1814,7 @@ fn waiting_notes(app: &mut CraftApp, ui: &mut Ui, waiting: &[Note], t: &Tokens) 
     }
 }
 
-fn composer(app: &mut CraftApp, ui: &mut Ui, width: f32, t: &Tokens, last_waiting: Option<&Note>) {
+fn composer(app: &mut CraftApp, ui: &mut Ui, width: f32, t: &Tokens, last_waiting: Option<&Note>, text_limit: f32) -> f32 {
     let running = app.running();
     if let Some(steps) = plan(&app.state.feed).filter(|p| running || p.iter().any(|s| s.status != PlanStatus::Done)) {
         let began = app.open_run().filter(|_| running).map(RebuildRun::started);
@@ -1863,7 +1874,9 @@ fn composer(app: &mut CraftApp, ui: &mut Ui, width: f32, t: &Tokens, last_waitin
             prompt_box::PromptBox {
                 name: "Ask for a change",
                 hint,
-                rows: (1, 8),
+                min_rows: 2,
+                viewport_height: prompt_box::ViewportHeight::Pane,
+                text_height_limit: Some(text_limit),
                 attach: Some("Attach pictures (or drop or paste them here)"),
                 previews: &previews,
                 // The one way to pause (Continue picks up where it stopped).
@@ -1911,7 +1924,9 @@ fn composer(app: &mut CraftApp, ui: &mut Ui, width: f32, t: &Tokens, last_waitin
             }
         }
         questions_switch(app, ui);
-    });
+        out.text_height
+    })
+    .inner
 }
 
 /// Send what's in the prompt box: a question (the switch, or /btw) is answered without building.

@@ -1694,6 +1694,9 @@ Gaps found while using the app for real projects.
       — claimed: tanish2k09, branch bugfix/r2.9-plugin-args-bad-list
 - [ ] The plugin form doesn't check that a command exists or that the plugin answers before it's
       saved; #2153 also asks for that (a found-program check, a test call)
+- [x] Let the prompt box grow with the draft and scroll internally only after it reaches its height limit
+      — claimed: Codex, branch bugfix/r2.9-prompt-box-sizing
+- [ ] Keep the Project controls visible when a tall pinned plan fills the smallest window, even with a short draft
 - [x] Each project chooses, per kind of action, what the builder's approvals get (allow, ask or
       refuse): reading the web, commands, files outside the project, pushing and publishing,
       deleting outside the project, system changes, other tools. Unset kinds follow Auto mode as

@@ -3,7 +3,8 @@
 //! rebuild tools both hold one; each run keeps its own project's feed, so nothing here depends on
 //! which project is on screen. A run whose AI uses our own agent loop works alone: its tools run in
 //! the app's session, which points at one project at a time, so a run starting beside it would send
-//! its files and asset spending to the other project.
+//! its files and asset spending to the other project. A set whose starter runs each build in a
+//! process of its own ([`RunSet::with_own_sessions`], the app's runner builds) has no such run.
 
 use super::*;
 use std::collections::{HashMap, VecDeque};
@@ -44,6 +45,9 @@ pub struct RunSet {
     starter: Starter,
     /// A [`keep_queue_moving`] thread is looking after the queue.
     watched: bool,
+    /// Its starter gives each run a session of its own (another process, [`super::runner`]), so
+    /// no run needs to work alone.
+    own_sessions: bool,
 }
 
 /// Whether this run's tools would run in the app's session: its Builder is an API backend, or the
@@ -66,7 +70,29 @@ impl std::fmt::Debug for RunSet {
 impl RunSet {
     /// At most `limit` runs work at once (at least one).
     pub fn new(limit: usize) -> RunSet {
-        RunSet { limit: limit.max(1), runs: HashMap::new(), queue: VecDeque::new(), alone: None, starter: Box::new(RebuildRun::start), watched: false }
+        RunSet {
+            limit: limit.max(1),
+            runs: HashMap::new(),
+            queue: VecDeque::new(),
+            alone: None,
+            starter: Box::new(RebuildRun::start),
+            watched: false,
+            own_sessions: false,
+        }
+    }
+
+    /// Its starter runs each build with a session of its own, as [`super::runner::starter`]'s
+    /// runner processes do: then a run whose tools would share the app's session doesn't, and
+    /// none waits to work alone.
+    pub fn with_own_sessions(mut self) -> RunSet {
+        self.own_sessions = true;
+        self
+    }
+
+    /// Whether `opts`' run must work alone in this set ([`must_work_alone`], unless every run has
+    /// a session of its own).
+    fn alone(&self, hub: &AiHub, ws: &Workspace, opts: &RunOptions) -> bool {
+        !self.own_sessions && must_work_alone(hub, ws, opts)
     }
 
     /// A run may start now: there's a place, and neither it nor anyone working needs to be alone.
@@ -99,7 +125,7 @@ impl RunSet {
                 ToolError::new(ErrorCode::BadInput, "This project is already building.").with_remediation("Add to it while it works, or stop it first.")
             );
         }
-        let alone = must_work_alone(hub, &ws, &opts);
+        let alone = self.alone(hub, &ws, &opts);
         if self.queue.is_empty() && self.has_room(alone) {
             let root = ws.root.clone();
             let run = (self.starter)(hub, ws, opts)?;
@@ -127,7 +153,7 @@ impl RunSet {
             // `RebuildRun::start` reads too.
             let ws = Workspace::open(&ws.root).unwrap_or(ws);
             // The Builder may have been changed while it waited.
-            let alone = must_work_alone(hub, &ws, &opts);
+            let alone = self.alone(hub, &ws, &opts);
             if !self.has_room(alone) {
                 self.queue.push_front((ws, opts, alone));
                 break;
@@ -210,12 +236,48 @@ impl RunSet {
         }
     }
 
-    /// Empty the queue and stop every run (closing the app).
+    /// Empty the queue and stop every run (closing the app), the ones followed in another process
+    /// too. To leave those working, [`detach_all`](Self::detach_all) first.
     pub fn stop_all(&mut self) {
         self.queue.clear();
         for r in self.runs.values() {
             r.stop();
         }
+    }
+
+    /// Take over a follower made elsewhere (by [`RebuildRun::attach`] on a worker, as it reads the
+    /// disk) for the build another process runs on its project. It counts as working here (it
+    /// takes a place, and [`stop`](Self::stop) pauses it), but this set never started it and
+    /// dropping it never stops it. A project this set is already building or has queued is
+    /// refused (the follower is dropped, which leaves that build alone).
+    pub fn adopt(&mut self, run: RebuildRun) -> Result<(), ToolError> {
+        if self.is_busy(&run.root) {
+            return Err(
+                ToolError::new(ErrorCode::BadInput, "This project is already building here.").with_remediation("Add to it while it works, or stop it first.")
+            );
+        }
+        self.runs.insert(run.root.clone(), run);
+        Ok(())
+    }
+
+    /// Runs followed from another process that are still working: closing the app leaves them
+    /// working or pauses them ([`detach_all`](Self::detach_all), [`stop_all`](Self::stop_all)).
+    pub fn followed(&self) -> usize {
+        self.runs.values().filter(|r| r.is_attached() && r.is_running()).count()
+    }
+
+    /// The person chose to keep the runs followed from another process building after this
+    /// window closes ([`RebuildRun::keep_building`]); call it before [`detach_all`](Self::detach_all).
+    pub fn keep_followed(&self) {
+        for r in self.runs.values().filter(|r| r.is_attached() && r.is_running()) {
+            r.keep_building();
+        }
+    }
+
+    /// Forget every run followed from another process, leaving them working (closing the app
+    /// while builds go on elsewhere).
+    pub fn detach_all(&mut self) {
+        self.runs.retain(|_, r| !r.is_attached());
     }
 }
 
@@ -336,6 +398,24 @@ mod tests {
         set.poll(&hub);
         assert!(set.is_running(&later.root));
         assert_eq!(set.start(&hub, agent.clone(), by("Agent")).unwrap(), Started::Running, "agent apps still work side by side");
+        set.stop_all();
+    }
+
+    /// Builds in runner processes each have a session of their own: one on an API backend
+    /// starts beside the others, and nothing waits behind it.
+    #[test]
+    fn runs_with_sessions_of_their_own_never_wait_to_work_alone() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = |n: &str| Workspace::create(d.path(), n, "A game", TargetRef::None).unwrap();
+        let (agent, key, later) = (ws("Agent"), ws("Key"), ws("Later"));
+        let hub = two_backends();
+        let by = |name: &str| RunOptions { backend: Some(name.into()), ..RunOptions::default() };
+        let fake = StandIns::new();
+        let mut set = RunSet::new(4).with_starter(fake.starter()).with_own_sessions();
+        assert_eq!(set.start(&hub, agent.clone(), by("Agent")).unwrap(), Started::Running);
+        assert_eq!(set.start(&hub, key.clone(), by("Key")).unwrap(), Started::Running, "an API builder doesn't wait for the session");
+        assert_eq!(set.start(&hub, later.clone(), by("Key")).unwrap(), Started::Running, "nor does anything wait behind it");
+        assert_eq!(set.active(), 3);
         set.stop_all();
     }
 

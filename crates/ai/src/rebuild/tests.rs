@@ -7,6 +7,9 @@ mod note_progress;
 #[path = "stall_tests.rs"]
 mod stall;
 
+#[path = "unwatched_tests.rs"]
+mod unwatched_runs;
+
 // Helpers that take a built-in kind's id, so each test reads as one line.
 fn kind(id: &str) -> Arc<dyn TargetKind> {
     KindRegistry::built_in().get(id).unwrap()
@@ -545,6 +548,8 @@ fn notes_added_while_it_works_reach_the_agent_at_its_next_step() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        watch: None,
+        paused_for_nobody: false,
         assets: false,
         usage: None,
         self_check: None,
@@ -622,6 +627,8 @@ fn a_note_written_for_the_hook_carries_its_answers() {
         root: ws.root.clone(),
         started: Instant::now(),
         activity,
+        remote: None,
+        _watching: None,
     };
     let id = run.add_note("make it blue".into(), "make it blue".into(), Vec::new());
     let note = run.waiting().pop().unwrap();
@@ -1311,6 +1318,29 @@ fn needs_an_agent_app() {
     assert!(dir.join("1.json").is_file(), "a run that can't start leaves an earlier run's notes waiting (#1620)");
 }
 
+/// #1970: a build running elsewhere (another window, the command line) holds its project, and a
+/// second one is refused before it touches anything the first is using.
+#[test]
+fn a_project_building_elsewhere_is_left_to_that_build() {
+    use craft_anything_engine::workspace::build_lock::{BuildLock, held};
+    let engine = Arc::new(Engine::new(craft_anything_engine::testing::session()));
+    let d = tempfile::tempdir().unwrap();
+    let hub = AiHub::with_stores(engine, d.path().join("settings.toml"), crate::KeyStore::file_only(d.path().join("keys.toml")));
+    let ws = Workspace::create(d.path(), "x", "y", TargetRef::None).unwrap();
+    let dir = notes::notes_dir(&ws.inbox_dir());
+    let left = notes::Left { text: "make it blue".into(), shown: "make it blue".into(), pictures: Vec::new() };
+    notes::hand_over(&dir, 1, "make it blue", Some(&left)).unwrap();
+    let other = BuildLock::take(&ws).unwrap().expect("free");
+    let err = RebuildRun::start(&hub, ws.clone(), RunOptions::default()).err().unwrap();
+    assert_eq!(err.message, BUILDING_ELSEWHERE, "refused for the other build, before looking for a coding agent");
+    assert!(dir.join("1.json").is_file(), "the other build's waiting note is still its own");
+    assert!(held(&ws.root), "and it still holds the project");
+    drop(other);
+    let err = RebuildRun::start(&hub, ws.clone(), RunOptions::default()).err().unwrap();
+    assert!(err.message.contains("coding agent"), "free again: {}", err.message);
+    assert!(!held(&ws.root), "a run that couldn't start lets the project go");
+}
+
 /// A fork's own kind: recognised from its words, with its own stack and check.
 struct SlidesKind;
 struct OutlineCheck;
@@ -1494,6 +1524,8 @@ fn an_api_backend_builds_with_the_build_tools() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        watch: None,
+        paused_for_nobody: false,
         assets: false,
         usage: None,
         self_check: None,
@@ -1624,6 +1656,8 @@ fn the_mechanics_sheet_is_required_without_claiming_effective_behavior() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        watch: None,
+        paused_for_nobody: false,
         assets: false,
         usage: None,
         self_check: None,
@@ -2890,17 +2924,17 @@ fn a_caught_bug_leaves_a_status_the_person_can_act_on() {
     let dir = tempfile::tempdir().unwrap();
     let mut ws = Workspace::create(dir.path(), "x", "Build an app", TargetRef::None).unwrap();
     let panicked: Result<Result<String, ToolError>, Box<dyn std::any::Any + Send>> = Err(Box::new("boom"));
-    let (ok, message, paused) = super::run_outcome(panicked, &mut ws);
+    let (ok, message, paused) = super::run_outcome(panicked, &mut ws, false);
     assert!(!ok && !paused && message.contains("hit a bug"), "{message}");
     let saved = Workspace::open(&ws.root).unwrap();
     assert_eq!(saved.manifest.status, Status::NeedsYou, "a project can't be left saying Checking with nothing running");
     assert!(saved.manifest.note.contains("hit a bug"), "{}", saved.manifest.note);
     // A pause is not a failure.
-    let (ok, message, paused) = super::run_outcome(Ok(Err(ToolError::cancelled())), &mut ws);
+    let (ok, message, paused) = super::run_outcome(Ok(Err(ToolError::cancelled())), &mut ws, false);
     assert!(!ok && paused && message == "Paused.");
     assert_eq!(Workspace::open(&ws.root).unwrap().manifest.status, Status::Stopped);
     // A finished run keeps the status the run itself set.
-    let (ok, message, paused) = super::run_outcome(Ok(Ok("Ready.".into())), &mut ws);
+    let (ok, message, paused) = super::run_outcome(Ok(Ok("Ready.".into())), &mut ws, false);
     assert!(ok && !paused && message == "Ready.");
 }
 
@@ -2944,6 +2978,8 @@ pub(crate) fn check_worker(ws: &Workspace, deep: bool) -> Worker {
         reset_progress_after_notes: false,
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        watch: None,
+        paused_for_nobody: false,
     }
 }
 
@@ -3540,6 +3576,8 @@ fn preparing_the_builders_agent_does_not_lock_up() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        watch: None,
+        paused_for_nobody: false,
         assets: false,
         usage: None,
         self_check: None,
@@ -3583,6 +3621,8 @@ fn the_run_answers_the_builders_own_check_during_its_turn() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        watch: None,
+        paused_for_nobody: false,
         assets: false,
         usage: None,
         self_check: Some((Arc::new(SheetKind), 90.0)),
@@ -3622,6 +3662,8 @@ fn a_stopped_build_answers_the_check_it_took() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        watch: None,
+        paused_for_nobody: false,
         assets: false,
         usage: None,
         self_check: Some((Arc::new(SheetKind), 90.0)),
@@ -3683,6 +3725,8 @@ fn decompiling_once_is_remembered_by_the_project() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        watch: None,
+        paused_for_nobody: false,
         assets: false,
         usage: None,
         self_check: None,
@@ -3748,6 +3792,8 @@ fn a_build_says_why_it_refused_a_tool_that_needs_consent() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        watch: None,
+        paused_for_nobody: false,
         assets: false,
         usage: None,
         self_check: None,
@@ -3961,6 +4007,8 @@ fn a_note_the_builder_took_at_a_step_joins_the_feed_and_isnt_sent_again() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        watch: None,
+        paused_for_nobody: false,
         assets: false,
         usage: None,
         self_check: None,
@@ -4409,6 +4457,8 @@ fn a_session_left_on_another_computer_starts_a_new_one_from_the_project() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        watch: None,
+        paused_for_nobody: false,
         assets: false,
         usage: None,
         self_check: None,
@@ -4465,6 +4515,8 @@ fn a_missing_session_with_nothing_to_start_from_is_said_plainly() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        watch: None,
+        paused_for_nobody: false,
         assets: false,
         usage: None,
         self_check: None,
@@ -4532,6 +4584,8 @@ fn the_builders_conversation_travels_with_the_project() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        watch: None,
+        paused_for_nobody: false,
         assets: false,
         usage: None,
         self_check: None,
@@ -4610,6 +4664,8 @@ fn waiting_for_another_analysis(d: &Path, limit_secs: u64) -> (Worker, std::sync
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        watch: None,
+        paused_for_nobody: false,
         assets: false,
         usage: None,
         self_check: None,
@@ -4691,6 +4747,8 @@ fn a_later_run_opens_the_projects_program_again_for_the_builder() {
             feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
             keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
             kept_checks: Mutex::default(),
+            watch: None,
+            paused_for_nobody: false,
             assets: false,
             usage: None,
             self_check: None,

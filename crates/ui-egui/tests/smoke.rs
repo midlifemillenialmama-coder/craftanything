@@ -1042,6 +1042,60 @@ fn a_website_is_signed_in_to_from_make() {
     assert!(h.query_by_label("Sign in to this site").is_none());
 }
 
+/// Make says when a sign-in is already saved for the site and forgets it on request
+/// (`web_site_sign_out`); an address found only in the request offers the same.
+#[test]
+fn make_says_a_sign_in_is_saved_and_forgets_it() {
+    use craft_anything_engine::Session;
+    use craft_anything_engine::tools::site_sign_in;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let mut h = harness(move || {
+        let engine = demo::engine(Mode::Beginner, true);
+        {
+            // Sign-ins are kept in the session's config folder: never the person's own here.
+            let mut session = engine.session();
+            *session = Session::isolated(&root);
+            (session.settings.mode, session.settings.first_run_done, session.settings.language) = (Mode::Beginner, true, "en".into());
+            // A saved sign-in for the site, as web_site_sign_in leaves it.
+            let key = site_sign_in::site_key("https://example.com").unwrap();
+            let saved = site_sign_in::sign_ins_dir(&session).join(&key);
+            std::fs::create_dir_all(saved.join("profile/Default")).unwrap();
+            std::fs::write(saved.join("sign-in.json"), serde_json::json!({"version": 1, "site": key, "saved_at": 1}).to_string()).unwrap();
+            assert!(site_sign_in::saved(&session, &key).is_some(), "the fixture must look like a saved sign-in");
+        }
+        demo::app(engine)
+    });
+    h.run_steps(3);
+    // Only the request names the site: nothing picked, nothing typed.
+    h.state_mut().state.make.request = "Recreate https://example.com/shop with darker colours".into();
+    h.run_steps(2);
+    h.get_by_label("From your request: example.com/shop");
+    h.get_by_label("A sign-in is saved for this site, and studies of it use it.");
+    h.get_by_label("Sign in to this site");
+    h.get_by_label("Forget the saved sign-in").click();
+    h.run_steps(1);
+    assert!(
+        wait(&mut h, |a| a.state.toasts.iter().any(|(t, err)| !*err && t.starts_with("example.com/shop: ") && t.contains("Forgot the saved sign-in"))),
+        "{:?}",
+        h.state().state.toasts
+    );
+    let gone = {
+        let session = h.state().engine.session();
+        site_sign_in::saved(&session, &site_sign_in::site_key("https://example.com").unwrap()).is_none()
+    };
+    assert!(gone, "the saved sign-in was deleted");
+    h.run_steps(2);
+    h.get_by_label("Does the site show more once you're signed in?");
+    assert!(h.query_by_label("Forget the saved sign-in").is_none(), "nothing left to forget");
+
+    // A typed address is the one used; the request's isn't named.
+    h.state_mut().state.make.url = "example.org".into();
+    h.run_steps(2);
+    assert!(h.query_by_label_contains("From your request:").is_none());
+    h.get_by_label("Sign in to this site");
+}
+
 /// Make's Simple / Advanced switch changes the app's mode and keeps the screen and the draft (#1286).
 #[test]
 fn the_make_card_switches_simple_and_advanced_and_keeps_the_draft() {

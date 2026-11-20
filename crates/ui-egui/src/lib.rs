@@ -47,7 +47,7 @@ pub mod workbench;
 
 use craft_anything_ai::{AgentEvent, AiHub, BackendConfig, Conversation, Detected};
 use craft_anything_engine::evidence::{ErrorCode, Evidence, ToolError, Unknown};
-use craft_anything_engine::tools::site_sign_in::SIGN_IN_TOOL;
+use craft_anything_engine::tools::site_sign_in::{self, SIGN_IN_TOOL, SIGN_OUT_TOOL};
 use craft_anything_engine::{CallOptions, Caller, Consent, Engine, Mode, Settings, TargetKind, ToolOutput, clean_room};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -588,6 +588,9 @@ pub struct CraftApp {
     pub creating: Option<u64>,
     /// A website sign-in window open from Make (one at a time; Start waits for it).
     pub signing_in: Option<u64>,
+    /// The site Make last asked about (its sign-in key) and whether a sign-in is saved for it:
+    /// read from disk once, not every frame, and read again after any job ends.
+    sign_in_known: Option<(String, bool)>,
     /// Tools the UI started that wait for the person's consent, by the id on their card.
     pending_consent: std::collections::HashMap<u64, (String, Value, Route)>,
     next_consent: u64,
@@ -693,6 +696,7 @@ impl CraftApp {
             saving: None,
             creating: None,
             signing_in: None,
+            sign_in_known: None,
             chat_jobs: Vec::new(),
             asking: Default::default(),
             pausing: Default::default(),
@@ -1072,6 +1076,26 @@ impl CraftApp {
         }
     }
 
+    /// Forget the sign-in saved for a website (`web_site_sign_out`), so studies of it start signed
+    /// out again. Not while a sign-in window is open or a new project is being made, as for signing in.
+    pub fn forget_site_sign_in(&mut self, url: &str) {
+        if self.signing_in.is_none() && self.creating.is_none() {
+            self.act(SIGN_OUT_TOOL, json!({ "url": url }), tr("Forget a website sign-in"));
+        }
+    }
+
+    /// Whether a sign-in is saved for `url`'s site. False too when it can't be read just now (a
+    /// tool holds the session): asked again next frame rather than waiting on the lock.
+    pub fn sign_in_saved(&mut self, url: &str) -> bool {
+        let Ok(key) = site_sign_in::site_key(url) else { return false };
+        if let Some((_, saved)) = self.sign_in_known.as_ref().filter(|(known, _)| *known == key) {
+            return *saved;
+        }
+        let Some(saved) = self.engine.try_session().map(|s| site_sign_in::saved(&s, &key).is_some()) else { return false };
+        self.sign_in_known = Some((key, saved));
+        saved
+    }
+
     fn acted(&mut self, job: u64, tool: &str, params: &Value, result: Result<Value, ToolError>) {
         match (tool, result) {
             ("project_preview", Ok(v)) => {
@@ -1142,6 +1166,18 @@ impl CraftApp {
             }
             (SIGN_IN_TOOL, Err(e)) if !clean_room::is_refusal(&e) => {
                 let failed = tr("Couldn't sign in to the site.");
+                self.toast(format!("{}: {failed} {}", make::site_name(params), e.for_people()), true);
+            }
+            (SIGN_OUT_TOOL, Ok(v)) => {
+                let words = tr(if v["removed"].as_bool() == Some(true) {
+                    "Forgot the saved sign-in. Studies of this site start signed out again."
+                } else {
+                    "No sign-in was saved, so there was nothing to forget."
+                });
+                self.toast(format!("{}: {words}", make::site_name(params)), false);
+            }
+            (SIGN_OUT_TOOL, Err(e)) if !clean_room::is_refusal(&e) => {
+                let failed = tr("Couldn't forget the sign-in.");
                 self.toast(format!("{}: {failed} {}", make::site_name(params), e.for_people()), true);
             }
             ("project_open_folder", Err(e)) => self.toast(format!("{} {}", tr("Couldn't open the folder."), e.message), true),
@@ -1586,6 +1622,8 @@ impl CraftApp {
         if self.signing_in == Some(job) {
             self.signing_in = None;
         }
+        // Any job may have saved or forgotten a sign-in (a button, the palette, a chat answer).
+        self.sign_in_known = None;
         // The form's own request: a newer Add replaces it, and an older answer is then stale.
         let form_request = self.server_form.connecting.as_ref().is_some_and(|(id, ..)| *id == job);
         if form_request {

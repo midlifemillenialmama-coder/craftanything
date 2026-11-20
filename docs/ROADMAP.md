@@ -2142,8 +2142,11 @@ Gaps found while using the app for real projects.
       cancels the wait), Start waits until it's over, and a message says what was kept. Not run
       with a real browser window from the app
       — claimed: mansur-akhmadi, branch feature/r2.9-make-site-sign-in
-- [ ] Make doesn't say whether a sign-in is already saved for the typed site, nor offer to forget
-      it (`web_site_sign_out`); an address found only in the request has no sign-in button
+- [x] Make says when a sign-in is already saved for the site (read once per site, and again
+      after any job ends) and offers "Forget the saved sign-in" (`web_site_sign_out`), with a
+      message saying whether one was forgotten; an address found only in the request (nothing
+      typed or picked) gets the same sign-in row, naming the site. Not run with a real browser
+      window from the app — PR #2235
 - [ ] Study with the person's own already-running browser through its debugging endpoint, as an
       alternative to a saved sign-in
 - [ ] Sign in once with `web_site_sign_in` on a real site behind a login (and with the Ubuntu

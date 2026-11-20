@@ -29,6 +29,8 @@ xcap = "0.9"
 # Whether Screen Recording is allowed (a safe call; xcap uses the same crate).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-graphics = "0.3"
+# Asking a pictured app to quit before it's killed (safe calls; xcap already brings this crate).
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSRunningApplication"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal", "process"] }

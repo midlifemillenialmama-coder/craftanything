@@ -654,6 +654,17 @@ impl RunningProcess {
         self.result.is_some()
     }
 
+    /// Ask the program to close, wait at most `grace` for it to end, then kill the whole group and
+    /// wait as [`RunningProcess::kill_and_wait`] does. A helper the program had launchd start isn't
+    /// in its group, so only the program's own quit can stop it before it's left holding the
+    /// program's files. Returns whether the end was confirmed in time.
+    pub fn close_and_wait(&mut self, grace: Duration, d: Duration) -> bool {
+        if !self.is_finished() && ask_to_close(self.pid) {
+            self.pull(Some(grace));
+        }
+        self.kill_and_wait(d)
+    }
+
     fn pull(&mut self, block: Option<Duration>) {
         if self.result.is_some() {
             return;
@@ -699,6 +710,33 @@ impl RunningProcess {
         self.pull(Some(d));
         self.result.as_ref()
     }
+}
+
+/// An app quits as if the person chose Quit; anything else gets SIGTERM, sent to its group.
+/// Returns whether the request went out.
+#[cfg(target_os = "macos")]
+fn ask_to_close(pid: u32) -> bool {
+    let app = i32::try_from(pid).ok().and_then(objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier);
+    app.is_some_and(|app| app.terminate()) || terminate_group(pid)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn ask_to_close(pid: u32) -> bool {
+    terminate_group(pid)
+}
+
+/// Asking on Windows means posting WM_CLOSE to the program's windows, which needs `unsafe` and the
+/// workspace forbids it, so the program is killed straight away (ROADMAP R2.4).
+#[cfg(windows)]
+fn ask_to_close(_pid: u32) -> bool {
+    false
+}
+
+/// The child leads its own group, so the group id is its pid.
+#[cfg(unix)]
+fn terminate_group(pid: u32) -> bool {
+    use nix::sys::signal::{Signal, killpg};
+    i32::try_from(pid).is_ok_and(|pid| killpg(nix::unistd::Pid::from_raw(pid), Signal::SIGTERM).is_ok())
 }
 
 impl Drop for RunningProcess {
@@ -1981,6 +2019,26 @@ mod tests {
         let out = Process::new("cat").timeout(Duration::from_secs(5)).run().unwrap();
         assert!(out.success);
         assert!(out.stdout.is_empty());
+    }
+
+    /// R2.4: a pictured program was killed outright, so it never got to stop what it started
+    /// outside its group. Asked to close, it runs its own shutdown before the kill.
+    #[test]
+    fn a_program_asked_to_close_runs_its_shutdown_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let tidied = dir.path().join("tidied");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut p = Process::new("sh")
+            .args(["-c", "trap ': > tidied; exit 0' TERM; echo ready; while :; do sleep 1; done"])
+            .cwd(dir.path())
+            .on_stdout_line(move |l| {
+                let _ = tx.send(l.to_string());
+            })
+            .spawn()
+            .unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(20)).ok().as_deref(), Some("ready"));
+        assert!(p.close_and_wait(Duration::from_secs(10), Duration::from_secs(5)));
+        assert!(tidied.exists(), "it was killed before it could run its shutdown");
     }
 
     #[test]

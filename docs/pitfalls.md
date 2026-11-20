@@ -297,6 +297,10 @@ the program it opened stayed open (and held the shell's pipe, so the command nev
 the caller may exit next, use `kill_and_wait`, and check after a live run that nothing was left
 running.
 
+**Killing the group isn't closing the program.** The pictured program was killed outright, so a
+helper it had launchd start (not in its group) kept running with the program's files open. Ask the
+program to close first and kill only after a short wait (`RunningProcess::close_and_wait`).
+
 **A turn's own process outlived its answer.** `run_cli` only sent `AgentEvent::TurnDone` once the
 whole coding-agent subprocess exited, never once its JSON stream said the turn was done (the
 `result` line). Claude Code can print that line and then linger (its own shutdown hook, logging)

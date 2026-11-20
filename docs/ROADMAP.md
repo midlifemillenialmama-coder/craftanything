@@ -1529,8 +1529,13 @@ Owner: maintainers · Status: in progress
       whole words and never the system, so `win` no longer pictures the menu bar
 - [x] `native_window_capture` keeps looking for up to 10 s past `wait_secs` when no window is there
       yet, instead of deciding from one look; tried with a program that opens its window late
-- [ ] Close a pictured program politely before killing it: a helper it started through launchd
-      outlives the process group, and can stay running with the program's data files open
+- [x] Close a pictured program politely before killing it: a helper it started through launchd
+      outlives the process group, and can stay running with the program's data files open.
+      `native_window_capture` now asks first (an app on macOS quits as from its menu, anything
+      else on macOS and Linux gets SIGTERM to its group), waits up to 3 s, then kills the group
+      — PR #2244
+- [ ] Close a pictured program politely on Windows too: it is still killed straight away, since
+      posting WM_CLOSE to its windows needs `unsafe`
 - [x] `apple_calls_observe`: the breakpoint callback is one valid line (it had a literal backslash
       and `n` between statements, so lldb stopped before launching, #251), covers every breakpoint
       instead of only the first, a failed lldb run is an error and not "0 calls", and names or

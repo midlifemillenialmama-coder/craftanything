@@ -169,6 +169,7 @@ impl TargetKind for WebsiteKind {
             "網站",
             "网页",
             "網頁",
+			" уебсайт"
         ]) || says_site_in_estonian(cx)
         {
             Some(50)

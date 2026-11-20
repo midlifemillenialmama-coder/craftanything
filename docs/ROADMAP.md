@@ -251,10 +251,12 @@ only when it's green and a maintainer has fully reviewed it, code as well as wor
       a save could be shown after it, putting the old folder back (in the app too, until the next
       refresh). Snapshots are numbered as they're read and an older one is dropped
       — claimed: bflatastic, branch bugfix/r5.2-stale-backend-snapshots
-- [ ] Two paths are outside that numbering (review of #1721): choosing the builder saves on the
-      UI thread and changes the list without a new number, so a refresh read just before it can
-      still put the old choice back; and the results of a model change and of saved model options
-      aren't filtered at all. Give each the same number, with a test of the order
+- [x] Complete the numbered Settings snapshots from #1721. Builder choices already return a
+      numbered worker snapshot; model changes and saved model options now return a complete
+      snapshot through the same ordering check. A delayed refresh cannot undo a save, and a late
+      save result cannot replace a newer view or settle a newer save's controls. Tests hold real
+      worker results to check both orders, saves on different backends and rejected saves
+      — claimed: Afloat16, branch bugfix/r5.2-ordered-model-snapshots
 - [x] `which::tests::usual_windows_dirs_come_after_path` (platform) failed on Windows with 10
       found, 9 expected ("nothing twice"): #748's second Antigravity folder, counted since #770
 - [x] `capture::console_tests` (platform) timed out now and then with the whole platform suite

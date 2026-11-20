@@ -96,9 +96,11 @@ where the CLI refuses every write and command itself. Clean room is refused befo
 starts: the adapter declares no file or terminal capability, so the CLI reads files on its own in
 every mode, and `plan` does not stop a read.
 
-This client answers a permission request with the `allow_once` option, found by its `kind` rather
-than the CLI's own id (`allow`), so a grant never becomes `allow_always`: a request that offers only
-an always-grant is cancelled.
+This client answers a permission request with a one-time option, found by its `kind` rather than
+the CLI's own id (`allow`): `allow_once` for a grant, so a grant never becomes `allow_always` (a
+request that offers only an always-grant is cancelled), and `reject_once` for a refusal, whatever
+order the options come in (an agent's persistent refusal is taken only when it offers no one-time
+one).
 
 CodeBuddy reaches every MCP tool through one wrapper, `DeferExecuteTool`, naming the real tool in
 its input (`mcp__craft-anything__build_file_write`). The approval policy unwraps it, so it judges

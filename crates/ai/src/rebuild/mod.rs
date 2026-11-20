@@ -916,7 +916,9 @@ impl Worker {
         let ghidra = s.settings.ghidra_launcher().is_some();
         let image_model = s.settings.assets.image_model.clone();
         drop(s);
-        let cx = BriefCx { ws, deep, ghidra, editor: self.editor.as_deref(), assets: self.assets, image_model: image_model.as_deref(), sees_pictures };
+        let inspection = study::inspection_for(deep, &ws.manifest.target, kind);
+        let cx =
+            BriefCx { ws, deep, ghidra, editor: self.editor.as_deref(), assets: self.assets, image_model: image_model.as_deref(), sees_pictures, inspection };
         // The project's settings as they are now, for an agent that carries on its session.
         let now = || kind.follow_up_sections(&cx).iter().map(|s| format!("\n\n{s}")).collect::<String>() + &pictures_reminder(ws, sees_pictures);
         let mut prompt = match &opts.message {
@@ -978,7 +980,7 @@ impl Worker {
                 };
                 self.step(ws, Step::Build, Status::Building, doing)?;
                 ws.manifest.awaiting_check = false;
-                let reply = self.turn(ws, agent.as_mut(), &prompt, deep, fresh.take());
+                let reply = self.turn_with_inspection(ws, agent.as_mut(), &prompt, deep, fresh.take(), deep.then_some(inspection));
                 // Kept even when the turn failed: the conversation is still worth carrying.
                 if let Some(a) = &keeper {
                     self.keep_session(ws, a.as_ref());
@@ -1042,7 +1044,7 @@ impl Worker {
                 }
                 if !reminded && needs_decompile_reminder(deep, &ws.manifest) {
                     reminded = true;
-                    prompt = DECOMPILE_FIRST.to_string();
+                    prompt = decompile_first(inspection).to_string();
                     continue;
                 }
             }
@@ -1245,8 +1247,23 @@ impl Worker {
 
     /// `fresh`: what to send instead when the agent's saved session turns out not to be on this
     /// computer.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn turn(&mut self, ws: &mut Workspace, agent: &mut dyn Conversation, prompt: &str, deep: bool, fresh: Option<String>) -> Result<String, ToolError> {
-        self.turn_with_wait(ws, agent, prompt, deep, fresh, |stop, seconds| {
+        let studies_folder = self.self_check.as_ref().is_some_and(|(k, _)| k.studies_folder());
+        let inspection = deep.then(|| study::inspection_for_target(deep, &ws.manifest.target, studies_folder));
+        self.turn_with_inspection(ws, agent, prompt, deep, fresh, inspection)
+    }
+
+    fn turn_with_inspection(
+        &mut self,
+        ws: &mut Workspace,
+        agent: &mut dyn Conversation,
+        prompt: &str,
+        deep: bool,
+        fresh: Option<String>,
+        inspection: Option<study::LocalInspection>,
+    ) -> Result<String, ToolError> {
+        self.turn_with_wait_for_inspection(ws, agent, prompt, deep, fresh, inspection, |stop, seconds| {
             for _ in 0..seconds {
                 stop.check()?;
                 std::thread::sleep(Duration::from_secs(1));
@@ -1264,20 +1281,37 @@ impl Worker {
 
     /// Run one turn, retrying what the adapter calls retryable, and keep the session it reports
     /// with the mode this run started in.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn turn_with_wait(
         &mut self,
         ws: &mut Workspace,
         agent: &mut dyn Conversation,
         prompt: &str,
         deep: bool,
+        fresh: Option<String>,
+        wait_for: impl FnMut(&CancelToken, u64) -> Result<(), ToolError>,
+    ) -> Result<String, ToolError> {
+        let studies_folder = self.self_check.as_ref().is_some_and(|(k, _)| k.studies_folder());
+        let inspection = deep.then(|| study::inspection_for_target(deep, &ws.manifest.target, studies_folder));
+        self.turn_with_wait_for_inspection(ws, agent, prompt, deep, fresh, inspection, wait_for)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn turn_with_wait_for_inspection(
+        &mut self,
+        ws: &mut Workspace,
+        agent: &mut dyn Conversation,
+        prompt: &str,
+        deep: bool,
         mut fresh: Option<String>,
+        inspection: Option<study::LocalInspection>,
         mut wait_for: impl FnMut(&CancelToken, u64) -> Result<(), ToolError>,
     ) -> Result<String, ToolError> {
         let mut prompt = prompt.to_string();
         let mut tries = 0u64;
         let mut retry = false;
         loop {
-            let result = self.converse_turn(ws, agent, &prompt, retry);
+            let result = self.converse_turn(ws, agent, &prompt, retry, inspection);
             let lost = result.is_err() && agent.session_lost();
             if lost {
                 // The id is for a session this computer doesn't have: never ask for it again.
@@ -1328,10 +1362,17 @@ impl Worker {
     /// Send one message and pump the agent until its turn ends, relaying events and inbox
     /// requests. Returns the agent's reply text.
     fn converse(&mut self, ws: &mut Workspace, agent: &mut dyn Conversation, text: &str) -> Result<String, ToolError> {
-        self.converse_turn(ws, agent, text, false)
+        self.converse_turn(ws, agent, text, false, None)
     }
 
-    fn converse_turn(&mut self, ws: &mut Workspace, agent: &mut dyn Conversation, text: &str, retry: bool) -> Result<String, ToolError> {
+    fn converse_turn(
+        &mut self,
+        ws: &mut Workspace,
+        agent: &mut dyn Conversation,
+        text: &str,
+        retry: bool,
+        inspection: Option<study::LocalInspection>,
+    ) -> Result<String, ToolError> {
         if retry {
             agent.retry(text);
         } else {
@@ -1367,8 +1408,9 @@ impl Worker {
                         }
                     }
                     // Decided on the tool's own id (its CLI and `mcp__…__` names included).
-                    AgentEvent::ToolStarted { tool, .. }
-                        if self.engine.registry().canonical(tool) == Some(craft_anything_engine::tools::native_function::PSEUDOCODE_TOOL) =>
+                    AgentEvent::ToolStarted { tool, input, .. }
+                        if inspection
+                            .is_some_and(|kind| self.engine.registry().canonical(tool).is_some_and(|id| study::tool_marks_decompiled(id, input, kind))) =>
                     {
                         ws.manifest.decompiled = true
                     }

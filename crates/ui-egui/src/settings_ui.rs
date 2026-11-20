@@ -361,6 +361,24 @@ fn model_options_loading(ui: &mut Ui, backend: &str) {
     });
 }
 
+/// A model change's save in progress, in place of the Change… link, so a save waiting behind a
+/// long job (an engine download) is never shown as if nothing had happened. The message is the
+/// row's live region (a polite status), stable for as long as the save runs: a screen reader
+/// hears that the change is on its way without focus moving onto it, and hears it leave when
+/// the save lands.
+fn model_saving(ui: &mut Ui, t: &Tokens, backend: &str) {
+    ui.add(crate::widgets::Spinner::new().size(theme::CAPTION).color(t.accent));
+    ui.push_id(("model-saving", backend), |ui| {
+        let text = tr("Saving the new model…");
+        let r = ui.label(RichText::new(&text).color(t.text_faint).size(theme::CAPTION));
+        r.ctx.accesskit_node_builder(r.id, |b| {
+            b.set_role(egui::accesskit::Role::Status);
+            b.set_live(egui::accesskit::Live::Polite);
+            b.set_value(text);
+        });
+    });
+}
+
 /// Draw AI settings and model pickers, preserving drafts during contention and invalidating confirmed context changes.
 /// Connection checks are delegated to the shared worker API.
 fn ai(app: &mut CraftApp, ui: &mut Ui) {
@@ -511,6 +529,11 @@ fn ai(app: &mut CraftApp, ui: &mut Ui) {
                         });
                         ui.data_mut(|d| d.insert_temp(id, program));
                     }
+                    // A model change saves through the engine's session, which a long job can hold
+                    // (an engine download): the row shows that save as pending, instead of snapping
+                    // back to the old model as if nothing had happened. The entry goes when the
+                    // job's result is handled, so it can't outlive the save.
+                    let model_pending = app.model_jobs.contains_key(&b.name);
                     // Which model it uses, and the ones it can be set to (#123).
                     if live_catalog {
                         let options = app.backend_options.get(&b.name);
@@ -537,6 +560,8 @@ fn ai(app: &mut CraftApp, ui: &mut Ui) {
                                     close_picker = true;
                                 }
                             });
+                        } else if model_pending {
+                            model_saving(ui, &t, &b.name);
                         } else if widgets::link(ui, "Change…").clicked() {
                             pick_agent_model = Some(b.name.clone());
                         }
@@ -548,7 +573,9 @@ fn ai(app: &mut CraftApp, ui: &mut Ui) {
                             );
                             match app.model_picker.as_ref().filter(|(n, _)| *n == b.name) {
                                 None => {
-                                    if widgets::caption_link(ui, "Change…").clicked() {
+                                    if model_pending {
+                                        model_saving(ui, &t, &b.name);
+                                    } else if widgets::caption_link(ui, "Change…").clicked() {
                                         pick_model = Some(b.name.clone());
                                     }
                                 }

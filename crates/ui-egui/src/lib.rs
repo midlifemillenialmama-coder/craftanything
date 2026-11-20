@@ -487,6 +487,8 @@ pub struct CraftApp {
     pub agent_model_picker: Option<builders::AgentModelPicker>,
     model_request: u64,
     pub model_tuning: std::collections::BTreeMap<String, ModelTuningDraft>,
+    /// Each AI's pending model change, by name, while its save runs (it can wait behind a long job).
+    pub(crate) model_jobs: std::collections::BTreeMap<String, u64>,
     /// The agent app whose program the file dialog is choosing.
     pub picking_program_for: Option<String>,
     /// Claude Code folders being typed in Settings → AI, by AI, until they're saved.
@@ -643,6 +645,7 @@ impl CraftApp {
             agent_model_picker: None,
             model_request: 0,
             model_tuning: Default::default(),
+            model_jobs: Default::default(),
             picking_program_for: None,
             folder_inputs: Default::default(),
             builder: None,
@@ -1577,6 +1580,11 @@ impl CraftApp {
     fn handle_done(&mut self, done: jobs::Finished<Done>) {
         let job = done.job;
         let checked_agent = self.agent_connection_jobs.remove(&job);
+        // A model change's save job is over, whether it saved or failed: Settings stops
+        // showing it as pending, even for a backend whose row is no longer drawn.
+        if let Some(name) = self.model_jobs.iter().find_map(|(name, id)| (*id == job).then(|| name.clone())) {
+            self.model_jobs.remove(&name);
+        }
         if self.saving == Some(job) {
             self.saving = None;
         }

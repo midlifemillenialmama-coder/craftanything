@@ -1579,6 +1579,47 @@ fn an_ais_model_is_changed_in_settings() {
     assert!(h.state().model_picker.is_none(), "the picker closes once a model is chosen");
 }
 
+/// A model change saves through the engine's session, which a long job (an engine download) can
+/// hold: Settings says the change is being saved instead of snapping back to the old model as if
+/// nothing had happened, and it lands once the long job is over.
+#[test]
+fn a_model_change_behind_a_busy_session_shows_as_being_saved() {
+    let url = model_server();
+    let mut h = harness(move || {
+        let mut a = demo::app(demo::engine(Mode::Experienced, true));
+        a.hub.add_server("Box", &url, Some("nomic-embed-text"), None).unwrap();
+        a.state.settings_open = true;
+        a.state.settings_tab = craft_anything_ui_egui::state::SettingsTab::Ai;
+        a
+    });
+    h.state_mut().refresh_backends();
+    assert!(wait(&mut h, |a| a.backends.iter().any(|b| b.name == "Box")));
+    h.run_steps(2);
+    h.get_by_label("Change…").click();
+    assert!(wait(&mut h, |a| a.model_picker.as_ref().is_some_and(|(_, m)| m.as_deref() == Some(&["nomic-embed-text".to_string(), "qwen3:8b".into()][..]))));
+    h.run_steps(2);
+    // Hold the session, as an engine download does while it runs: the change's save waits.
+    let engine = h.state().engine.clone();
+    let held = engine.session();
+    h.state_mut().set_model("Box", "qwen3:8b");
+    h.run_steps(3);
+    // The message is a polite live region (a status), so a screen reader hears the change is on
+    // its way without focus moving onto it.
+    fn saving(h: &Harness<'_, CraftApp>) -> bool {
+        h.query_all_by_role(egui::accesskit::Role::Status).any(|node| node.value().as_deref() == Some("Saving the new model…"))
+    }
+    assert!(saving(&h), "the pending message is announced, not just painted");
+    assert!(h.query_by_label("Change…").is_none(), "no second change while one is being saved");
+    assert!(h.query_by_label("Model: qwen3:8b").is_none(), "the new model isn't claimed before it's saved");
+    // The long job ends: the change lands and the row goes back to normal.
+    drop(held);
+    assert!(wait(&mut h, |a| a.backends.iter().any(|b| b.name == "Box" && b.model == "qwen3:8b")));
+    h.run_steps(2);
+    h.get_by_label("Model: qwen3:8b");
+    assert!(!saving(&h), "the live region leaves with it");
+    h.get_by_label("Change…");
+}
+
 #[test]
 fn an_api_backends_request_rate_is_set_in_settings() {
     let mut h = harness(|| {

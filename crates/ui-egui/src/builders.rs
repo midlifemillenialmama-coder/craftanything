@@ -231,29 +231,34 @@ impl CraftApp {
         });
     }
 
-    /// Submit the matching picker's selection for background validation and persistence against its captured context.
+    /// Submit the matching picker's selection for background validation and persistence against its
+    /// captured context. The job is remembered, so Settings can show the save as pending.
     pub fn set_agent_model(&mut self, name: &str, model: Option<String>, thinking: Option<craft_anything_ai::Effort>) {
         let Some(picker) = self.agent_model_picker.take().filter(|p| p.context.backend.config.name == name) else { return };
         let hub = self.hub.clone();
-        self.jobs.spawn(tr("Change an AI's model"), false, move |_| {
+        let job = self.jobs.spawn(tr("Change an AI's model"), false, move |_| {
             hub.set_agent_selection(&picker.context, model.as_deref(), thinking).map_err(|e| e.for_people())?;
             Ok(crate::backends(&hub))
         });
+        self.model_jobs.insert(name.to_string(), job);
     }
 
-    /// Use `model` for an AI from now on.
+    /// Use `model` for an AI from now on. The job is remembered, so Settings can show the save as
+    /// pending while it waits behind a long one (an engine download holds the engine's session).
     pub fn set_model(&mut self, name: &str, model: &str) {
         self.model_picker = None;
         if let Some(state) = self.model_tuning.get_mut(name) {
             state.saving = true;
         }
         let (hub, name, model) = (self.hub.clone(), name.to_string(), model.to_string());
-        self.jobs.spawn(tr("Change an AI's model"), false, move |_| {
+        let (key, name) = (name.clone(), name);
+        let job = self.jobs.spawn(tr("Change an AI's model"), false, move |_| {
             let result = hub.set_model(&name, &model).and_then(|_| {
                 hub.options().get(&name).cloned().ok_or_else(|| craft_anything_engine::evidence::ToolError::invalid("The AI backend was removed."))
             });
             Ok(crate::Done::ModelChanged { name, model, result })
         });
+        self.model_jobs.insert(key, job);
     }
 
     /// Populate the persistent model controls on a worker, once for each backend/model pair.

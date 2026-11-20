@@ -593,6 +593,11 @@ through pipes, as Windows does.
 
 ## Design
 
+**A readiness flag outlived the provider it described.** A Deep export cached success after a
+bridge failure removed its provider. The next function restarted the bridge after the startup
+budget check and decompiled past the deadline. Cache unavailable results for the call, but
+reconfirm successful readiness through the provider slot before checking the remaining budget.
+
 **A source inventory limit came after expansion.** Taking five thousand names after collecting
 every source path copied a large `sourceRoot` into every entry first. Count retained entries and
 expanded UTF-8 bytes before allocating each path, share the budget across indexed sections and

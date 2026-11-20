@@ -2213,6 +2213,10 @@ Gaps found while using the app for real projects.
       A maintainer's call, made by merging: Simple's larger text was there for people who find
       small text hard to read, and this leaves that to zoom
       — claimed: jgt87, branch feature/r2.9-one-size-both-modes — PR #1236
+- [x] On Windows the build check said "npm.cmd isn't installed or isn't on your PATH" although a
+      terminal found npm (#2178): programs are looked up in a PATH whose `%VAR%` entries are
+      expanded (`which::expand_vars`), and in Node.js's own install folder after it
+      — claimed: justinjohn0306, branch bugfix/2178-npm-on-windows-path
 
 ### R2.10 Pinned builds
 Owner: maintainers · Status: in progress

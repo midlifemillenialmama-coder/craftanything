@@ -365,6 +365,12 @@ only when it's green and a maintainer has fully reviewed it, code as well as wor
       — claimed: tanish2k09, branch bugfix/r5.2-interrupted-loopback-call
 - [ ] `mcp_client.rs`'s `post` reports an interrupted call (EINTR) as "Couldn't reach the plugin"
       (`EngineMissing`); a JSON-RPC POST isn't safe to send again, so say it was interrupted instead
+- [x] Every PR that adds UI strings appends them to the end of all 14 catalogs, so any two such
+      PRs conflict once one merges (#1465): one folder per language (`i18n/<code>/core.tsv`),
+      each PR adding its own file there, joined in name order by `build.rs`
+      — claimed: justinjohn0306, branch chore/r5.2-catalog-folders
+- [ ] `i18n/awaiting.txt` is still one shared list that PRs append to, so two UI changes that
+      each list strings awaiting translation still conflict there (#1465)
 
 ### R5.3 A builder that can't make progress stops
 Owner: open · Status: todo

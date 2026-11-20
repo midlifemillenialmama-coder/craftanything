@@ -1,3 +1,5 @@
+// Modifications (c) 2026 SuperSfera LLC, MIT OR Apache-2.0.
+
 //! What each adapter's builder gets, as typed data: our tool server, approvals from us, a session
 //! it can continue, a note during a turn, and a message of any length.
 //!
@@ -82,6 +84,8 @@ const DECLARED: &[Declared] = &[
     Declared { id: "aider", path: Path::Argv, tool_server: Given::No, approvals: Given::No, mid_turn_notes: Given::No },
     Declared { id: "copilot", path: Path::Acp, tool_server: Given::Yes, approvals: Given::Yes, mid_turn_notes: Given::No },
     Declared { id: "grok", path: Path::Acp, tool_server: Given::Yes, approvals: Given::Yes, mid_turn_notes: Given::No },
+    // `cursor-agent acp`: our server on `session/new`, permission requests over ACP (slava/local, from #735).
+    Declared { id: "cursor-agent", path: Path::Acp, tool_server: Given::Yes, approvals: Given::Yes, mid_turn_notes: Given::No },
     // Its print path gets neither; ACP (`acp = true` on the backend) hands over the server and
     // its permission requests, but isn't what a run does unless the person turned it on.
     Declared { id: "devin", path: Path::Argv, tool_server: Given::No, approvals: Given::No, mid_turn_notes: Given::No },

@@ -1,3 +1,5 @@
+// Modifications (c) 2026 SuperSfera LLC, MIT OR Apache-2.0.
+
 //! AI backends, the agent loop and crews.
 //!
 //! The UI talks to this crate only through [`AiHub`] and [`Conversation`]: start a conversation,
@@ -99,7 +101,7 @@ impl BackendKind {
             BackendKind::Gemini => openai::GEMINI_MODELS,
             BackendKind::OpenaiCompatible => &[],
             BackendKind::AgentCli => {
-                &["claude-code", "codex", "copilot", "grok", "gemini-cli", "opencode", "antigravity", "hermes", "maki", "aider", "dsh", "devin"]
+                &["claude-code", "codex", "copilot", "grok", "gemini-cli", "opencode", "antigravity", "hermes", "maki", "aider", "dsh", "devin", "cursor-agent"]
             }
         }
     }

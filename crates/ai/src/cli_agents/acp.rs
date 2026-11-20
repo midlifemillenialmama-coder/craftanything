@@ -1,3 +1,5 @@
+// Modifications (c) 2026 SuperSfera LLC, MIT OR Apache-2.0.
+
 //! Agents that speak the Agent Client Protocol (ACP: JSON-RPC 2.0, one message per line on the
 //! agent's stdin/stdout) as one more [`Conversation`]. One agent process serves the whole chat:
 //! `initialize`, then `session/new` (or `session/load` to continue) with our MCP server, then one
@@ -34,6 +36,7 @@ pub const ACP_AGENTS: &[(&str, &[&str])] = &[
     // Flags that belong to this mode (`--model`, `--no-leader`) go between `agent` and `stdio`.
     ("grok", &["agent"]),
     ("devin", &["acp"]),
+    ("cursor-agent", &["acp"]),
 ];
 
 /// Agents whose ACP mode takes the backend's model (`cli_model`), and the flag after the ACP
@@ -180,6 +183,9 @@ pub struct AcpCore {
     config_options: Vec<Value>,
     /// `(configId, value)` applied in order after the session opens, before it is ready.
     config_queue: VecDeque<(String, String)>,
+    /// When set, `initialize` must advertise an agent version on or after this date, so a build
+    /// does not start on an ACP agent known to ignore `session/new` MCP servers. (From #735.)
+    mcp_since: Option<(u16, u8, u8)>,
     /// A loaded session already has history. Set when the session response arrives, and copied
     /// onto [`session_has_history`](Self::session_has_history) once the config queue is done.
     opened_with_history: bool,
@@ -222,6 +228,7 @@ impl AcpCore {
             current_model: String::new(),
             config_options: Vec::new(),
             config_queue: VecDeque::new(),
+            mcp_since: None,
             opened_with_history: false,
             typed_mcp: false,
             auth: None,
@@ -444,6 +451,14 @@ impl AcpCore {
         let result = msg.get("result").unwrap_or(&Value::Null);
         match kind {
             Pending::Initialize => {
+                if let Some(min) = self.mcp_since
+                    && agent_version_too_old(result, min)
+                {
+                    return self.fail(
+                        format!("{} is too old to run Craft Anything's tools over ACP.", self.agent_name),
+                        Some(format!("Update {}, then try again.", self.agent_name)),
+                    );
+                }
                 self.can_load = result.pointer("/agentCapabilities/loadSession").and_then(Value::as_bool).unwrap_or(false);
                 // `authenticate` goes only to an agent that advertises the method its stored key
                 // authenticates with (`ACP_KEY_AGENTS`): a key never goes under another method,
@@ -477,6 +492,13 @@ impl AcpCore {
                 }
                 if self.session.is_none() {
                     return self.fail(format!("{} started no session", self.agent_name), None);
+                }
+                // Questions send no MCP server, so an empty report there is expected. A build or
+                // analysis that asked for one must not continue when the agent says none started.
+                if !self.question
+                    && let Some(why) = mcp_not_started(result, super::MCP_NAME)
+                {
+                    return self.fail(format!("{} started no Craft Anything tools.", self.agent_name), Some(why));
                 }
                 // Ready waits until the queued overrides are applied. Grok's `--model` flag does
                 // not survive `session/new`; the saved default comes back and has to be set here.
@@ -607,6 +629,65 @@ impl AcpCore {
             _ => return Vec::new(),
         };
         vec![Out::Event(ev)]
+    }
+}
+
+/// The advertised agent version in an `initialize` result (v1 `agentInfo`, v2 `info`).
+fn advertised_version(result: &Value) -> Option<&str> {
+    result.pointer("/agentInfo/version").or_else(|| result.pointer("/info/version")).and_then(Value::as_str)
+}
+
+/// The `YYYY.MM.DD` date at the start of a Cursor-style version (`2026.06.04-5fd875e`).
+fn version_date(s: &str) -> Option<(u16, u8, u8)> {
+    let date = s.split('-').next().unwrap_or(s);
+    let mut parts = date.split('.');
+    let year = parts.next()?.parse().ok()?;
+    let month = parts.next()?.parse().ok()?;
+    let day = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    Some((year, month, day))
+}
+
+fn agent_version_too_old(result: &Value, min: (u16, u8, u8)) -> bool {
+    // An agent that reports no version at all (Cursor's `agent acp` sends none in `initialize`)
+    // is not judged old: the program was already checked by `--version` before it started.
+    let Some(version) = advertised_version(result) else { return false };
+    version_date(version).is_none_or(|got| got < min)
+}
+
+/// When the session result reports MCP startup, why our server is missing or failed.
+/// A missing field is not a report. An empty list is: the agent named no server at all.
+fn mcp_not_started(result: &Value, name: &str) -> Option<String> {
+    let servers = result.get("mcpServers").or_else(|| result.pointer("/_meta/mcpServers"))?.as_array()?;
+    if servers.is_empty() {
+        return Some("It reported no MCP servers. Update the agent so it starts the MCP server sent with the session, then try again.".into());
+    }
+    let statuses: Vec<(&str, &str)> = servers
+        .iter()
+        .filter_map(|server| {
+            let listed = server.get("name").and_then(Value::as_str)?;
+            let status = server.get("status").or_else(|| server.get("state")).and_then(Value::as_str);
+            let failed = server.get("error").is_some_and(|error| !error.is_null());
+            match (status, failed) {
+                (None, false) => None,
+                (Some(status), _) => Some((listed, status)),
+                (None, true) => Some((listed, "failed")),
+            }
+        })
+        .collect();
+    if statuses.is_empty() {
+        return None;
+    }
+    match statuses.iter().find(|(listed, _)| *listed == name) {
+        Some((_, status)) if ["connected", "ok", "ready", "started"].contains(status) => None,
+        Some((_, status)) => {
+            Some(format!("It reported Craft Anything's tools as {status}. Update the agent so it starts the MCP server sent with the session, then try again."))
+        }
+        None => Some(
+            "It started other MCP servers but not Craft Anything's. Update the agent so it starts the MCP server sent with the session, then try again.".into(),
+        ),
     }
 }
 
@@ -857,6 +938,12 @@ impl AcpConversation {
         if let Some(error) = self.validation_error.clone().or_else(|| self.access_error.clone()) {
             return Err(error);
         }
+        // `agent` may be Grok Build or Cursor's CLI: ask the program which, before starting it.
+        if let Some(want) = self.adapter.identity()
+            && self.program != "ssh"
+        {
+            super::check_identity(&self.program, want)?;
+        }
         let name = display_for(&self.agent);
         let resume = self.lock().as_ref().and_then(|s| s.core.session_id()).or_else(|| self.resume.clone());
         let mut core = AcpCore::new(&self.backend, &self.agent, &name, self.cwd.clone(), self.mcp.clone(), resume).with_auth(self.auth.clone());
@@ -864,6 +951,9 @@ impl AcpConversation {
         core.sign_in_fix = self.adapter.sign_in_fix();
         core.typed_mcp = self.adapter.acp_mcp_stdio_type();
         core.config_queue = VecDeque::from(self.session_config.clone());
+        if !self.question {
+            core.mcp_since = self.adapter.acp_mcp_since();
+        }
         if self.approver.is_some() {
             core = core.deciding();
         }
@@ -1696,5 +1786,179 @@ printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$prompt
         let out = sent(&c.cancel());
         assert!(out.iter().any(|m| m["id"] == 5 && m["result"]["outcome"]["outcome"] == "cancelled"));
         assert!(out.iter().any(|m| m["method"] == "session/cancel" && m["params"]["sessionId"] == "s"));
+    }
+}
+
+/// slava/local: Cursor over ACP (ported from #735) and telling `agent` binaries apart.
+#[cfg(test)]
+mod slava_cursor_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn core() -> AcpCore {
+        let mcp = McpCommand { command: "craft-anything-cli".into(), args: vec!["mcp".into()], notes: None };
+        AcpCore::new("Cursor", "cursor-agent", "Cursor Agent", PathBuf::from("/w/project"), mcp, None)
+    }
+
+    fn sent(outs: &[Out]) -> Vec<Value> {
+        outs.iter().filter_map(|o| if let Out::Send(l) = o { serde_json::from_str(l).ok() } else { None }).collect()
+    }
+
+    fn events(outs: Vec<Out>) -> Vec<AgentEvent> {
+        outs.into_iter().filter_map(|o| if let Out::Event(e) = o { Some(e) } else { None }).collect()
+    }
+
+    #[test]
+    fn an_old_cursor_version_is_refused_before_the_session_starts() {
+        let mut c = core();
+        c.mcp_since = Some((2026, 6, 5));
+        c.start();
+        let refused = events(c.line(r#"{"jsonrpc":"2.0","id":1,"result":{"agentInfo":{"name":"cursor-agent","version":"2026.06.04-5fd875e"}}}"#));
+        assert!(matches!(&refused[0], AgentEvent::Error { message, .. } if message.contains("too old")), "{refused:?}");
+        assert!(!c.ready);
+        let mut c = core();
+        c.mcp_since = Some((2026, 6, 5));
+        c.start();
+        c.prompt("What does it do?");
+        let new = sent(&c.line(r#"{"jsonrpc":"2.0","id":1,"result":{"agentInfo":{"name":"cursor-agent","version":"2026.10.22-27dcf5f"}}}"#));
+        assert_eq!(new[0]["method"], "session/new");
+        assert_eq!(new[0]["params"]["mcpServers"][0]["name"], "craft-anything");
+        let prompt = sent(&c.line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s-1","mcpServers":[{"name":"craft-anything","status":"connected"}]}}"#));
+        assert_eq!(prompt[0]["method"], "session/prompt");
+        assert!(c.ready);
+        assert_eq!(version_date("2026.06.04-5fd875e"), Some((2026, 6, 4)));
+        assert!(agent_version_too_old(&json!({"agentInfo":{"version":"2026.06.04-5fd875e"}}), (2026, 6, 5)));
+        assert!(!agent_version_too_old(&json!({"info":{"version":"2026.10.22-27dcf5f"}}), (2026, 6, 5)));
+        assert!(agent_version_too_old(&json!({"agentInfo":{"version":"1.0.50"}}), (2026, 6, 5)), "Grok's version is not a Cursor date");
+        assert!(
+            !agent_version_too_old(&json!({"protocolVersion":1,"agentCapabilities":{"loadSession":true}}), (2026, 6, 5)),
+            "real Cursor initialize carries no version"
+        );
+    }
+
+    #[test]
+    fn a_session_that_reports_mcp_startup_failure_or_an_empty_list_is_not_ready() {
+        for report in [r#"[{"name":"craft-anything","status":"failed"}]"#, "[]", r#"[{"name":"other","status":"connected"}]"#] {
+            let mut c = core();
+            c.start();
+            c.line(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#);
+            let line = format!(r#"{{"jsonrpc":"2.0","id":2,"result":{{"sessionId":"s-1","mcpServers":{report}}}}}"#);
+            let failed = events(c.line(&line));
+            assert!(matches!(&failed[0], AgentEvent::Error { message, .. } if message.contains("started no Craft Anything tools")), "{report}: {failed:?}");
+            assert!(!c.ready);
+        }
+        // No report at all, or an entry with no status, is not a failure.
+        for result in [r#"{"sessionId":"s-1"}"#, r#"{"sessionId":"s-1","mcpServers":[{"name":"craft-anything"}]}"#] {
+            let mut c = core();
+            c.start();
+            c.prompt("What does it do?");
+            c.line(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#);
+            let prompt = sent(&c.line(&format!(r#"{{"jsonrpc":"2.0","id":2,"result":{result}}}"#)));
+            assert_eq!(prompt[0]["method"], "session/prompt", "{result}");
+        }
+        // A question attaches no server, so an empty list is expected there.
+        let mut q = core();
+        q.question = true;
+        q.start();
+        q.prompt("Just a question.");
+        q.line(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#);
+        let prompt = sent(&q.line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s-1","mcpServers":[]}}"#));
+        assert_eq!(prompt[0]["method"], "session/prompt");
+    }
+
+    #[test]
+    fn version_lines_name_the_agent_not_the_file_name() {
+        use super::super::{AgentIdentity, identity_from_version};
+        assert_eq!(identity_from_version("grok 1.0.50\n"), Some(AgentIdentity::Grok));
+        assert_eq!(identity_from_version("\n  grok 1.0.77 (abc123)"), Some(AgentIdentity::Grok));
+        assert_eq!(identity_from_version("2026.10.22-27dcf5f\n"), Some(AgentIdentity::Cursor));
+        assert_eq!(identity_from_version("Cursor Agent 2026.11.01"), Some(AgentIdentity::Cursor));
+        assert_eq!(identity_from_version("1.2.3"), None);
+        assert_eq!(identity_from_version("groking 1.0"), None);
+        assert_eq!(identity_from_version(""), None);
+    }
+
+    /// A fake `agent`: `--version` prints `$VERSION_LINE`; otherwise it plays a Cursor-style ACP
+    /// session (agentInfo, MCP connected, one prompt) and records its arguments.
+    #[cfg(unix)]
+    fn fake_agent(dir: &Path, version_line: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let program = dir.join("agent");
+        let script = format!(
+            r#"#!/bin/sh
+d=$(dirname "$0")
+if [ "$1" = --version ]; then echo '{version_line}'; exit 0; fi
+printf '%s\n' "$@" > "$d/argv"
+IFS= read -r init
+echo '{{"jsonrpc":"2.0","id":1,"result":{{"agentInfo":{{"name":"cursor-agent","version":"2026.10.22-27dcf5f"}}}}}}'
+IFS= read -r new
+printf '%s\n' "$new" > "$d/new"
+echo '{{"jsonrpc":"2.0","id":2,"result":{{"sessionId":"s-1","mcpServers":[{{"name":"craft-anything","status":"connected"}}]}}}}'
+IFS= read -r prompt
+echo '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
+"#
+        );
+        std::fs::write(&program, script).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        program
+    }
+
+    #[cfg(unix)]
+    fn run_turn(agent: &str, program: &Path, dir: &Path) -> Vec<AgentEvent> {
+        let mcp = McpCommand { command: "craft-anything-cli".into(), args: vec!["mcp".into()], notes: None };
+        let args: Vec<String> = ACP_AGENTS.iter().find(|(id, _)| *id == agent).map(|(_, a)| a.iter().map(|s| s.to_string()).collect()).unwrap_or_default();
+        let mut c = AcpConversation::new("Fake", agent, program.display().to_string(), args, dir.into(), mcp, None);
+        c.send("Hello");
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let mut all = Vec::new();
+        while !all.iter().any(|e| matches!(e, AgentEvent::TurnDone { .. } | AgentEvent::Error { .. })) {
+            assert!(std::time::Instant::now() < deadline, "no TurnDone or Error: {all:?}");
+            all.extend(c.poll());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        all
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cursor_runs_over_acp_with_our_mcp_server_when_agent_is_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = fake_agent(dir.path(), "2026.10.22-27dcf5f");
+        let events = run_turn("cursor-agent", &program, dir.path());
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::Error { .. })), "{events:?}");
+        assert_eq!(std::fs::read_to_string(dir.path().join("argv")).unwrap().trim(), "acp");
+        let new: Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join("new")).unwrap()).unwrap();
+        assert_eq!(new["params"]["mcpServers"][0]["name"], "craft-anything");
+        assert_eq!(new["params"]["mcpServers"][0]["command"], "craft-anything-cli");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_grok_agent_binary_is_refused_as_cursor_and_never_started_in_acp_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = fake_agent(dir.path(), "grok 1.0.50");
+        let events = run_turn("cursor-agent", &program, dir.path());
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Error { message, .. } if message.contains("is Grok Build") && message.contains("not Cursor Agent"))),
+            "{events:?}"
+        );
+        assert!(!dir.path().join("argv").exists(), "the ACP session must not start");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cursor_agent_binary_is_refused_as_grok() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = fake_agent(dir.path(), "2026.10.22-27dcf5f");
+        let events = run_turn("grok", &program, dir.path());
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Error { message, .. } if message.contains("is Cursor Agent") && message.contains("not Grok Build"))),
+            "{events:?}"
+        );
+        assert!(!dir.path().join("argv").exists());
+        // The same check passes for the agent it really is.
+        assert!(super::super::check_identity(&program.display().to_string(), super::super::AgentIdentity::Cursor).is_ok());
+        let grok = fake_agent(&tempfile::tempdir().unwrap().keep(), "grok 1.0.50");
+        assert!(super::super::check_identity(&grok.display().to_string(), super::super::AgentIdentity::Grok).is_ok());
     }
 }

@@ -1,3 +1,5 @@
+// Modifications (c) 2026 SuperSfera LLC, MIT OR Apache-2.0.
+
 //! The person's installed Grok Build CLI, driven over ACP (`grok agent stdio`). Sign-in stays in
 //! `grok login`. Craft Anything checks that an auth file exists and does not read it.
 
@@ -21,6 +23,11 @@ impl AgentAdapter for Grok {
 
     fn requires_acp(&self) -> bool {
         true
+    }
+
+    /// `agent` on a Grok Build install is Grok, but Cursor's CLI has the same name.
+    fn identity(&self) -> Option<AgentIdentity> {
+        Some(AgentIdentity::Grok)
     }
 
     fn has_model_catalog(&self) -> bool {

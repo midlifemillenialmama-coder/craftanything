@@ -1,3 +1,5 @@
+// Modifications (c) 2026 SuperSfera LLC, MIT OR Apache-2.0.
+
 //! How each agent CLI is driven: its arguments, the flags it must have, how its output stream
 //! reads, and anything it needs before a run (a sign-in check). Each is an [`AgentAdapter`]; an
 //! [`AgentAdapters`] registry maps agent ids to them, and an agent it doesn't know gets the plain
@@ -8,6 +10,7 @@ use super::*;
 mod aider;
 mod antigravity;
 mod copilot;
+mod cursor_agent;
 mod devin;
 mod dsh;
 mod grok;
@@ -17,6 +20,7 @@ mod opencode;
 pub use aider::Aider;
 pub use antigravity::Antigravity;
 pub use copilot::Copilot;
+pub use cursor_agent::CursorAgent;
 pub use devin::Devin;
 pub use dsh::DeepSeekHarness;
 pub use grok::Grok;
@@ -131,6 +135,17 @@ pub trait AgentAdapter: Send + Sync {
     /// process starts. The refusal is kept on the conversation and reported by `send`.
     fn validate_options(&self, _options: &BackendOptions) -> Result<(), ToolError> {
         Ok(())
+    }
+    /// First `YYYY.MM.DD` agent version known to start Client-supplied MCP servers on
+    /// `session/new`. `None`: this adapter doesn't need that check. Older builds can accept the
+    /// list and then run without Craft Anything's tools. (From #735.)
+    fn acp_mcp_since(&self) -> Option<(u16, u8, u8)> {
+        None
+    }
+    /// The agent this adapter expects behind its program, checked with `--version` before the
+    /// process starts, so a program named `agent` that is really another agent is refused.
+    fn identity(&self) -> Option<AgentIdentity> {
+        None
     }
     /// Refuse an access mode this agent cannot hold. The default allows every mode. A refusal
     /// is kept beside [`validate_options`](Self::validate_options) and reported by `send`.
@@ -327,6 +342,7 @@ impl AgentAdapters {
                 Arc::new(Grok),
                 Arc::new(DeepSeekHarness),
                 Arc::new(Devin),
+                Arc::new(CursorAgent),
             ],
         }
     }

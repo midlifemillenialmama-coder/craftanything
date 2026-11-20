@@ -1,3 +1,5 @@
+// Modifications (c) 2026 SuperSfera LLC, MIT OR Apache-2.0.
+
 //! Agent CLIs (Claude Code, Codex, Gemini CLI, OpenCode, Hermes…) run as owned subprocesses with
 //! our MCP server, optionally on another machine over ssh. Their JSON event streams become
 //! [`AgentEvent`]s.
@@ -56,7 +58,70 @@ pub const KNOWN: &[(&str, &str, &str)] = &[
     ("aider", "aider", "Aider"),
     ("dsh", "dsh", "DeepSeek Harness"),
     ("devin", "devin", "Devin"),
+    // Cursor's CLI installs both `agent` and `cursor-agent`; Grok Build also installs an `agent`,
+    // so this id and program avoid the bare name. Point `command` at either Cursor binary.
+    ("cursor-agent", "cursor-agent", "Cursor Agent"),
 ];
+
+/// A known agent told apart by what its `--version` prints, not by its file name: both Grok Build
+/// and Cursor's CLI install a program called `agent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentIdentity {
+    /// `grok 1.0.50`
+    Grok,
+    /// `2026.10.22-27dcf5f` (a date and a commit), or a line naming Cursor
+    Cursor,
+}
+
+impl AgentIdentity {
+    pub fn display(self) -> &'static str {
+        match self {
+            AgentIdentity::Grok => "Grok Build",
+            AgentIdentity::Cursor => "Cursor Agent",
+        }
+    }
+}
+
+/// Which known agent a `--version` output names, from its first non-empty line. `None` when it
+/// names neither (an unknown wrapper, a test script): then nothing is refused.
+pub fn identity_from_version(text: &str) -> Option<AgentIdentity> {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?.to_ascii_lowercase();
+    if line.split(|c: char| c.is_whitespace() || c == '/').any(|w| w == "grok") || line.contains("grok build") {
+        return Some(AgentIdentity::Grok);
+    }
+    let first = line.split_whitespace().next().unwrap_or_default();
+    let (date, commit) = first.split_once('-').unwrap_or((first, ""));
+    let parts: Vec<&str> = date.split('.').collect();
+    let dated = parts.len() == 3
+        && parts.first().is_some_and(|y| y.len() == 4)
+        && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        && !commit.is_empty()
+        && commit.bytes().all(|b| b.is_ascii_hexdigit());
+    if dated || line.contains("cursor") {
+        return Some(AgentIdentity::Cursor);
+    }
+    None
+}
+
+/// Refuse to start `program` as `want` when its `--version` says it is the other known agent.
+/// A program that won't answer `--version` is not refused here; starting it reports that.
+pub fn check_identity(program: &str, want: AgentIdentity) -> Result<(), ToolError> {
+    let Ok(out) = Process::new(program).arg("--version").timeout(Duration::from_secs(10)).stdout_cap(64 * 1024).stderr_cap(64 * 1024).run() else {
+        return Ok(());
+    };
+    let text = format!("{}\n{}", out.stdout_text(), out.stderr_text());
+    match identity_from_version(&text) {
+        Some(got) if got != want => Err(ToolError::new(
+            ErrorCode::BadSettings,
+            format!("{program} is {} ({}), not {}.", got.display(), text.trim().lines().next().unwrap_or_default(), want.display()),
+        )
+        .with_remediation(format!(
+            "Set this backend's `command` to the {} program. Both Grok Build and Cursor install a program named `agent`; which one it is comes from `--version`, not the name.",
+            want.display()
+        ))),
+        _ => Ok(()),
+    }
+}
 
 pub fn program_for(agent: &str) -> String {
     KNOWN.iter().find(|(id, _, _)| *id == agent).map(|(_, p, _)| p.to_string()).unwrap_or_else(|| agent.to_string())
@@ -3611,7 +3676,7 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
         reg.register(Arc::new(EchoAgent));
         assert_eq!(
             format!("{reg:?}"),
-            r#"["claude-code", "codex", "gemini-cli", "opencode", "antigravity", "hermes", "maki", "aider", "copilot", "grok", "dsh", "devin", "echo-agent"]"#
+            r#"["claude-code", "codex", "gemini-cli", "opencode", "antigravity", "hermes", "maki", "aider", "copilot", "grok", "dsh", "devin", "cursor-agent", "echo-agent"]"#
         );
     }
 

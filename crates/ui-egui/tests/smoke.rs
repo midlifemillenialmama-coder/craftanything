@@ -3017,6 +3017,197 @@ fn the_front_door_works_on_a_project_the_person_already_has() {
     h.run_steps(2);
 }
 
+/// A game naming Three.js starts from Make with Builder's choice even with Unity installed, without
+/// Unity's install window, and its journal records the skip as the run's own does (R2.7): the run
+/// finds the stack set.
+#[test]
+fn a_game_started_from_make_naming_three_js_is_built_with_it_and_journals_the_skip() {
+    use craft_anything_ai::rebuild::StandIns;
+    use craft_anything_engine::journal;
+    use craft_anything_engine::workspace::Workspace;
+    use craft_anything_engines::game::{Builder, Installed, Inventory};
+    let d = tempfile::tempdir().unwrap();
+    let runs = StandIns::new();
+    let (dir, r) = (d.path().to_path_buf(), runs.clone());
+    let mut h = harness_sized(egui::vec2(1280.0, 1120.0), move || {
+        let mut a = stand_in_app(dir, &r);
+        a.game_engines = Some(Inventory {
+            engines: vec![Installed { builder: Builder::Unity, version: "6000.0.23f1".into(), program: "Unity.exe".into() }],
+            ..Default::default()
+        });
+        a
+    });
+    h.run_steps(2);
+    // Nothing to recreate: the demo's Make starts with a website address.
+    h.state_mut().state.make.url.clear();
+    h.state_mut().state.make.target = craft_anything_engine::workspace::TargetRef::None;
+    h.state_mut().state.make.request = "Make a space shooter game using Three.js".into();
+    h.run_steps(3);
+    h.get_by_label_contains("Your request names Three.js, so this game is built with it rather than Unity.");
+    h.get_by_label("Start").click();
+    assert!(wait(&mut h, |a| a.creating.is_none() && a.workspace.is_some()), "made on a worker");
+    assert!(h.state().state.modal.is_none(), "no engine window");
+    let root = h.state().workspace.as_ref().unwrap().root.clone();
+    assert_eq!(Workspace::open(&root).unwrap().manifest.stack, "Builder's choice");
+    // Where the run's own entries go, and where `core_journal_read` reads them.
+    let inv = Workspace::open(&root).unwrap().investigation_dir();
+    let entries: Vec<String> = journal::days(&inv).iter().flat_map(|day| journal::read_day(&inv, day)).map(|v| v.to_string()).collect();
+    let skips: Vec<&String> = entries.iter().filter(|e| e.contains(r#""action":"engine_skipped""#)).collect();
+    assert!(skips.len() == 1 && skips[0].contains(r#""named":"Three.js""#), "{entries:?}");
+    assert!(
+        h.state().state.toasts.iter().any(|(text, err)| !*err && text.starts_with("Your request names Three.js") && text.contains("start a new project")),
+        "the project made, the skip is said"
+    );
+    h.state_mut().pause();
+    assert!(runs.finish(&root));
+    h.run_steps(2);
+}
+
+/// A game naming Three.js whose project can't be made says why, and not that it's built with
+/// Three.js: that notice waits for the project.
+#[test]
+fn a_game_naming_three_js_that_cant_be_made_says_nothing_about_three_js() {
+    use craft_anything_ai::rebuild::StandIns;
+    use craft_anything_engine::workspace::TargetRef;
+    let d = tempfile::tempdir().unwrap();
+    // The projects folder is a file, so no project can be made in it.
+    let projects = d.path().join("projects");
+    std::fs::write(&projects, "not a folder").unwrap();
+    let runs = StandIns::new();
+    let r = runs.clone();
+    let mut h = harness_sized(egui::vec2(1280.0, 1120.0), move || stand_in_app(projects, &r));
+    h.run_steps(2);
+    let make = &mut h.state_mut().state.make;
+    make.url.clear();
+    make.target = TargetRef::None;
+    make.request = "Make a space shooter game using Three.js".into();
+    h.run_steps(3);
+    h.get_by_label("Start").click();
+    assert!(wait(&mut h, |a| a.creating.is_none() && a.state.toasts.iter().any(|(_, err)| *err)), "the failure is said");
+    assert!(h.state().workspace.is_none(), "nothing was made");
+    assert!(!h.state().state.toasts.iter().any(|(text, _)| text.starts_with("Your request names")), "{:?}", h.state().state.toasts);
+}
+
+/// A game naming Three.js that waits for another build still says it's built with Three.js: the
+/// line that says it waits its turn carries the notice, rather than taking its place.
+#[test]
+fn a_queued_game_naming_three_js_says_both_that_it_waits_and_what_its_built_with() {
+    use craft_anything_ai::rebuild::StandIns;
+    use craft_anything_engine::workspace::{TargetRef, Workspace};
+    use craft_anything_engines::game::{Builder, Installed, Inventory};
+    let d = tempfile::tempdir().unwrap();
+    let busy = Workspace::create(d.path(), "Alpha", "A notes app", TargetRef::None).unwrap();
+    let runs = StandIns::new();
+    let (dir, r) = (d.path().to_path_buf(), runs.clone());
+    let mut h = harness_sized(egui::vec2(1280.0, 1120.0), move || {
+        let mut a = stand_in_app(dir, &r);
+        a.game_engines = Some(Inventory {
+            engines: vec![Installed { builder: Builder::Unity, version: "6000.0.23f1".into(), program: "Unity.exe".into() }],
+            ..Default::default()
+        });
+        a
+    });
+    h.run_steps(2);
+    // Another build takes the one place Settings allows (stand_in_app builds one at a time).
+    h.state_mut().open_workspace(busy.clone());
+    h.state_mut().follow_up(Some("Add tags".into()));
+    h.run_steps(2);
+    assert_eq!(runs.started(), std::slice::from_ref(&busy.root));
+    h.state_mut().state.screen = craft_anything_ui_egui::state::Screen::Home;
+    let make = &mut h.state_mut().state.make;
+    make.url.clear();
+    make.target = TargetRef::None;
+    make.request = "Make a space shooter game using Three.js".into();
+    h.run_steps(3);
+    h.get_by_label("Start").click();
+    assert!(wait(&mut h, |a| a.creating.is_none() && a.workspace.as_ref().is_some_and(|w| w.root != busy.root)), "made on a worker");
+    let root = h.state().workspace.as_ref().unwrap().root.clone();
+    assert_eq!(h.state().runs.position(&root), Some(1), "it waits its turn");
+    assert!(
+        h.state().state.toasts.iter().any(|(text, err)| !*err && text.starts_with("Your request names Three.js") && text.contains("waits its turn")),
+        "{:?}",
+        h.state().state.toasts
+    );
+    h.state_mut().pause();
+    assert!(runs.finish(&busy.root));
+    h.run_steps(2);
+}
+
+/// A folder that became a project after it was picked keeps its own stack when a game naming
+/// Three.js is started there: the worker finds the project, so nothing is skipped, recorded or said.
+#[test]
+fn a_game_naming_three_js_started_in_a_folder_that_holds_a_project_keeps_its_stack() {
+    use craft_anything_ai::rebuild::StandIns;
+    use craft_anything_engine::journal;
+    use craft_anything_engine::workspace::{TargetRef, Workspace};
+    use craft_anything_engines::game::{Builder, Installed, Inventory};
+    let d = tempfile::tempdir().unwrap();
+    let mine = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::create_at(mine.path(), "Shooter", "A space shooter game", TargetRef::None, None).unwrap();
+    ws.manifest.stack = "Godot".into();
+    ws.save().unwrap();
+    let runs = StandIns::new();
+    let (dir, r) = (d.path().to_path_buf(), runs.clone());
+    let mut h = harness_sized(egui::vec2(1280.0, 1120.0), move || {
+        let mut a = stand_in_app(dir, &r);
+        a.game_engines = Some(Inventory {
+            engines: vec![Installed { builder: Builder::Unity, version: "6000.0.23f1".into(), program: "Unity.exe".into() }],
+            ..Default::default()
+        });
+        a
+    });
+    h.run_steps(2);
+    let make = &mut h.state_mut().state.make;
+    make.url.clear();
+    make.target = TargetRef::None;
+    // Make's own folder, where a new project goes. Picking a folder that holds a project opens it,
+    // so Make holds this one only when the project appeared there after the pick; Start then
+    // works out the skip, and the worker, finding the project, drops it.
+    make.folder = Some(mine.path().to_path_buf());
+    make.request = "Make a space shooter game using Three.js".into();
+    h.run_steps(3);
+    h.get_by_label("Start").click();
+    assert!(wait(&mut h, |a| a.creating.is_none() && a.workspace.is_some()), "opened on a worker");
+    assert!(h.state().state.modal.is_none(), "no engine window");
+    let root = h.state().workspace.as_ref().unwrap().root.clone();
+    assert_eq!(root, mine.path(), "the folder's own project");
+    assert_eq!(Workspace::open(&root).unwrap().manifest.stack, "Godot", "its stack stays");
+    let inv = Workspace::open(&root).unwrap().investigation_dir();
+    let entries: Vec<String> = journal::days(&inv).iter().flat_map(|day| journal::read_day(&inv, day)).map(|v| v.to_string()).collect();
+    assert!(!entries.iter().any(|e| e.contains(r#""action":"engine_skipped""#)), "{entries:?}");
+    assert!(!h.state().state.toasts.iter().any(|(text, _)| text.starts_with("Your request names")), "no skip is said");
+    h.state_mut().pause();
+    assert!(runs.finish(&root));
+    h.run_steps(2);
+}
+
+/// A game built with Builder's choice keeps its generated-assets switch and budget on the project
+/// page, as one built with an engine does; a website with Builder's choice has none.
+#[test]
+fn a_game_built_with_builders_choice_keeps_its_asset_switch() {
+    use craft_anything_engine::workspace::{TargetRef, Workspace};
+    let d = tempfile::tempdir().unwrap();
+    let mut game = Workspace::create(d.path(), "Shooter", "Make a space shooter game using Three.js", TargetRef::None).unwrap();
+    game.manifest.stack = "Builder's choice".into();
+    game.save().unwrap();
+    game.set_person(|m| m.generate_assets = true).unwrap();
+    let mut site = Workspace::create(d.path(), "Timer", "A timer website", TargetRef::None).unwrap();
+    site.manifest.stack = "Builder's choice".into();
+    site.save().unwrap();
+    let mut h = harness(move || {
+        let mut a = demo::app(demo::engine(Mode::Beginner, true));
+        a.asset_keys = Some(fal_key(true));
+        a.open_workspace(game);
+        a
+    });
+    h.run_steps(4);
+    h.get_by_label("Generate custom pictures and models");
+    h.get_by_label("0 · $0.00 of $5.00");
+    h.state_mut().open_workspace(site);
+    h.run_steps(4);
+    assert!(h.query_by_label("Generate custom pictures and models").is_none(), "not a game");
+}
+
 /// A Godot project's files decide its engine: Start gets Godot, never the Unity that a request
 /// reading as a game would.
 #[test]

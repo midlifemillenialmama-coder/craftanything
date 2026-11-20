@@ -40,6 +40,11 @@ pub struct Stack {
     pub program: Option<String>,
     #[serde(default)]
     pub program_from: Option<String>,
+    /// For a game engine that must be installed to build with: the words that name it anywhere in a
+    /// request, alone or followed by a version or "2d"/"3d" (`unity` also matches "unity3d" and
+    /// "unity6"); see [`names_a_game_stack`].
+    #[serde(default)]
+    pub named_by: Vec<String>,
 }
 
 pub use craft_anything_engine::toolchains::{Toolchain, found_in as toolchain_in};
@@ -62,12 +67,24 @@ pub struct Library {
     pub steps: String,
 }
 
+/// A game technology the table has no stack for (Three.js, Pygame…): a new game naming one is built
+/// with it rather than with its default engine, whatever is installed (R2.7).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct GameTech {
+    /// Shown to the person ("Three.js").
+    pub name: String,
+    /// Phrases that name it, matched like [`Stack::asked_by`], as whole words.
+    pub said_as: Vec<String>,
+}
+
 #[derive(Debug, Default, serde::Deserialize)]
 struct Table {
     #[serde(default)]
     stack: Vec<Stack>,
     #[serde(default)]
     library: Vec<Library>,
+    #[serde(default)]
+    game_tech: Vec<GameTech>,
 }
 
 /// The built-in table. A table that doesn't parse (a broken edit) leaves it empty, so every
@@ -108,6 +125,31 @@ pub fn missing_program(stack: &str, have: impl Fn(&str) -> bool) -> Option<(&'st
 pub fn resolve(name: &str) -> Option<&'static Stack> {
     let n = name.trim();
     catalogue().iter().find(|s| s.name.eq_ignore_ascii_case(n) || s.engine.as_deref().is_some_and(|e| e.eq_ignore_ascii_case(n)))
+}
+
+/// The first game technology from the table's list that `words` (a request through [`words`])
+/// names, if any.
+pub fn game_tech_named(words: &str) -> Option<&'static GameTech> {
+    table().game_tech.iter().find(|t| t.said_as.iter().any(|p| words.contains(p.as_str())))
+}
+
+/// Whether one word of a request (through [`words`]) names a game engine of the table's that must
+/// be installed ([`Stack::named_by`]), alone or followed in the same word by "engine", a version
+/// or "2d"/"3d" ("unity", "unity2d", "godot4", "ue5", "unityengine", "unrealengine5"). Stacks that need no engine (Phaser, Bevy, Rust) have no such words.
+pub fn names_a_game_stack(word: &str) -> bool {
+    table().names_a_game_stack(word)
+}
+
+impl Table {
+    fn names_a_game_stack(&self, word: &str) -> bool {
+        // What may follow the name in one word: "engine", then a version or "2d"/"3d" ("unityengine",
+        // "unrealengine5", "unity3d", "godot4").
+        let version = |rest: &str| {
+            let rest = rest.strip_prefix("engine").unwrap_or(rest);
+            ["2d", "3d"].contains(&rest) || rest.chars().all(|c| c.is_ascii_digit())
+        };
+        self.stack.iter().flat_map(|s| &s.named_by).any(|n| word.strip_prefix(n.as_str()).is_some_and(version))
+    }
 }
 
 /// The first stack whose phrases appear in `words` (a request through [`words`]).
@@ -292,6 +334,117 @@ mod tests {
             assert_eq!(resolve(name), Some(stack));
         }
         assert!(asked_for(&words("a game with a phaser cannon")).is_none());
+    }
+
+    #[test]
+    fn game_engines_are_named_by_the_tables_words_with_any_version() {
+        for w in ["unity", "unity3d", "unity2d", "unity6", "unreal", "ue", "ue5", "godot", "godot4", "unityengine", "godotengine", "unrealengine5"] {
+            assert!(names_a_game_stack(w), "{w}");
+        }
+        // Stacks that need no engine installed don't keep the default: Builder's choice uses them.
+        for w in [
+            "phaser",
+            "phaser3",
+            "bevy",
+            "rust",
+            "macroquad",
+            "unityx",
+            "uefa",
+            "godots",
+            "rusty",
+            "three",
+            "pygame",
+            "electron",
+            "python",
+            "next",
+            "unityengines",
+            "engine",
+        ] {
+            assert!(!names_a_game_stack(w), "{w}");
+        }
+        // Every engine that needs an editor installed is named at least by its engine id, and no
+        // other stack has words: the words come from the table, not from code.
+        let needs_editor =
+            |s: &Stack| craft_anything_engines::game::Builder::from_stack(&s.name).is_some_and(|b| b != craft_anything_engines::game::Builder::Rust);
+        for s in catalogue() {
+            match &s.engine {
+                Some(e) if needs_editor(s) => assert!(s.named_by.contains(e), "{} isn't named by {e}", s.name),
+                _ => assert!(s.named_by.is_empty(), "{} needs no engine installed", s.name),
+            }
+            for n in &s.named_by {
+                assert!(!n.is_empty() && n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()), "{}: {n:?} must be one lower-case word", s.name);
+            }
+        }
+    }
+
+    #[test]
+    fn an_engine_added_to_the_table_is_named_with_no_code_change() {
+        // The built-in table and the same table with one more engine row: only the table decides.
+        let base = include_str!("stacks.toml");
+        let added = format!("{base}\n[[stack]]\nname = \"Toy Engine\"\nengine = \"toy\"\nnamed_by = [\"toyengine\"]\n");
+        let (before, after) = (parse(base).unwrap(), parse(&added).unwrap());
+        for w in ["toyengine", "toyengine2d", "toyengine5"] {
+            assert!(!before.names_a_game_stack(w) && after.names_a_game_stack(w), "{w}");
+        }
+    }
+
+    #[test]
+    fn listed_game_tech_matches_whole_words_and_common_spellings() {
+        let named = |r: &str| game_tech_named(&words(r)).map(|t| t.name.as_str());
+        for (name, spellings) in [
+            ("Three.js", &["three.js", "ThreeJS", "Three JS", "THREE.JS", "(three.js)"][..]),
+            ("Babylon.js", &["Babylon.js", "BabylonJS", "babylon js"]),
+            ("PixiJS", &["PixiJS", "pixi.js", "Pixi JS"]),
+            ("PlayCanvas", &["PlayCanvas"]),
+            ("Kaboom.js", &["Kaboom.js", "KaboomJS", "KAPLAY"]),
+            ("Excalibur.js", &["Excalibur.js", "ExcaliburJS"]),
+            ("raylib", &["raylib", "Raylib"]),
+            ("LÖVE", &["LÖVE", "löve", "Love2D", "LOVE2D", "Löve2D"]),
+            ("Pygame", &["Pygame", "pygame"]),
+            ("MonoGame", &["MonoGame"]),
+            ("libGDX", &["libGDX", "LibGdx"]),
+            ("SDL", &["SDL", "SDL2", "SDL 3", "sdl3"]),
+            ("SFML", &["SFML"]),
+            ("HTML5", &["HTML5", "HTML 5", "an HTML5-style retro game"]),
+            ("WebGL", &["WebGL", "webgl"]),
+            ("p5.js", &["p5.js", "P5JS"]),
+            ("Pyxel", &["Pyxel"]),
+            ("Ebitengine", &["Ebitengine", "Ebiten"]),
+            ("HaxeFlixel", &["HaxeFlixel"]),
+        ] {
+            for s in spellings {
+                assert_eq!(named(&format!("Make a space shooter game with {s}")), Some(name), "{s}");
+            }
+        }
+        // Words that only look like one, or mean something ordinary, name none.
+        for r in [
+            "Make a space shooter game",
+            "a game I'd love to play",
+            "made with love",
+            "a platform game, I love 2D art",
+            "a game I manage with pixi",
+            "a strategy game set in ancient Babylon",
+            "a game where you pull Excalibur from the stone",
+            "a game where the bombs go kaboom",
+            "a pixel-art platformer",
+            "a canvas painting game",
+            "a game about the SDLC",
+            "a three jump platformer",
+            "a game with zombies",
+            "a game using the arrow keys to move",
+        ] {
+            assert_eq!(named(r), None, "{r}");
+        }
+        for t in &table().game_tech {
+            assert!(!t.name.is_empty() && !t.said_as.is_empty(), "{t:?}");
+            for p in &t.said_as {
+                assert!(p.starts_with(' ') && p.ends_with(' ') && *p == p.to_lowercase(), "{} phrase {p:?} must be whole lower-case words", t.name);
+            }
+            let named_in_table = catalogue()
+                .iter()
+                .any(|s| s.name.eq_ignore_ascii_case(&t.name) || s.uses.iter().chain(&s.asked_by).any(|u| t.said_as.iter().any(|p| p.trim() == u.trim())));
+            assert!(!named_in_table, "{} has a stack in the table: it doesn't belong in the list", t.name);
+        }
     }
 
     #[test]

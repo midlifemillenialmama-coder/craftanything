@@ -34,6 +34,75 @@ pub(super) fn first_stack(kinds: &KindRegistry, ws: &Workspace, deep: bool) -> O
     found.map(|s| s.name.as_str()).or_else(|| kinds.choose(&m.request, &m.target, deep).map(|(_, stack)| stack))
 }
 
+/// A new game built with the builder's choice instead of its default engine: the request names a
+/// game technology from the table's list (`[[game_tech]]`), no engine that must be installed
+/// (`named_by`: Unity, Unreal, Godot) and no stack the way the table's phrases name one ("in
+/// Python"). What the request names wins,
+/// whatever engines are installed (R2.7; docs/pitfalls.md, "A default given as an order").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EngineSkipped {
+    /// The engine the game would have been built with.
+    pub engine: game::Builder,
+    /// The technology the request names, as the list shows it ("Three.js").
+    pub named: &'static str,
+}
+
+impl EngineSkipped {
+    /// What the person is told, with how to build with the engine instead.
+    pub fn notice(&self) -> String {
+        let engine = self.engine.name();
+        let id = stacks::get(self.engine.stack()).and_then(|s| s.engine.as_deref()).unwrap_or(engine);
+        format!(
+            "Your request names {}, so this game is built with it rather than {engine}. To build it with {engine}, start a new project with \"Build with\" set to {engine} (`--build-with {id}` in the CLI).",
+            self.named
+        )
+    }
+
+    /// Records the skip in `ws`'s journal (in its investigation, where the run's own entries go). The
+    /// run does this when it picks the stack, and the app does it when Make's Start creates the
+    /// project with Builder's choice.
+    /// The investigation is opened, or made as the run makes it, first: the run can't make it in a
+    /// folder that already holds a journal.
+    pub fn journal(&self, ws: &Workspace) -> Result<(), ToolError> {
+        let project = investigation(ws)?;
+        let entry = json!({"action": "engine_skipped", "engine": self.engine.name(), "named": self.named, "stack": stacks::BUILDERS_CHOICE});
+        craft_anything_engine::journal::append(&project.root, "stack", entry);
+        Ok(())
+    }
+}
+
+/// `ws`'s investigation project (its evidence and journal), made the first time it is needed.
+pub fn investigation(ws: &Workspace) -> Result<Project, ToolError> {
+    let dir = ws.investigation_dir();
+    Project::open(&dir).or_else(|_| Project::create(&dir, &ws.manifest.name, Purpose::default()))
+}
+
+/// Whether a new game whose stack would be its kind's default `engine` (nothing picked, nothing
+/// named) is built with the builder's choice instead: when the request names a technology from the
+/// table's list. Installed engines don't matter: the request's words come before a default. A
+/// request that names nothing keeps its engine, so the person is still offered to get it.
+pub fn listed_tech_instead(kinds: &KindRegistry, request: &str, target: &TargetRef, engine: game::Builder) -> Option<EngineSkipped> {
+    if engine == game::Builder::Rust {
+        return None;
+    }
+    // A game in the request's own words (a picked folder or a ticked box alone isn't kept: the run
+    // decides the kind from the request and the stack, and Builder's choice is no engine).
+    if kinds.detect(request, target, "")?.id() != GameKind::ID || kinds.named(request, target).is_some() {
+        return None;
+    }
+    let words = stacks::words(request);
+    // An engine that must be installed, named by one of its words anywhere ("a Unity WebGL game", "Unity3D",
+    // "UE5", "a Godot HTML5 game", "this Unreal game"), not only "in Unity": nothing changes here,
+    // so the game gets what it would get anyway, never something new. Stacks that need no engine
+    // ("a Phaser game", "a Rust game", "a Python game") don't count: Builder's choice then uses
+    // what the request names.
+    if words.split_whitespace().any(stacks::names_a_game_stack) {
+        return None;
+    }
+    let named = stacks::game_tech_named(&words)?;
+    Some(EngineSkipped { engine, named: named.name.as_str() })
+}
+
 /// Whether `folder` already holds a project (its `craft.json` is there).
 pub fn has_project(folder: &Path) -> bool {
     folder.join(craft_anything_engine::workspace::MANIFEST).is_file()

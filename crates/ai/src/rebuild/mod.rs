@@ -152,6 +152,9 @@ pub struct RunOptions {
     /// A free session is read first; this is the fallback while it is held; the saved settings
     /// are the last fallback.
     pub clean_room: Option<bool>,
+    /// Where to look for game engines; `None` (the default) looks in this computer's usual places.
+    /// Tests give stand-in folders so a run decides the same on every machine.
+    pub engine_places: Option<game::Places>,
 }
 
 impl Default for RunOptions {
@@ -169,6 +172,7 @@ impl Default for RunOptions {
             adapters: Default::default(),
             wake: Wake::default(),
             clean_room: None,
+            engine_places: None,
         }
     }
 }
@@ -347,6 +351,7 @@ impl RebuildRun {
             reset_progress_after_notes: false,
             keys: hub.keys.clone(),
             kept_checks: Mutex::default(),
+            engine_places: opts.engine_places.clone(),
         };
         let r2 = running.clone();
         let key_store = hub.keys.clone();
@@ -557,6 +562,8 @@ struct Worker {
     keys: crate::keys::KeyStore,
     /// The last check round in which everything worked, kept while nothing it looks at changes.
     kept_checks: Mutex<kept_check::KeptChecks>,
+    /// Where to look for game engines; `None` looks in this computer's usual places.
+    engine_places: Option<game::Places>,
 }
 
 /// The project a run records its usage in, and when it last did.
@@ -684,10 +691,9 @@ impl Worker {
         session.ext.insert(Arc::new(keys));
     }
 
-    /// Point the engine at this workspace: its investigation project and inbox.
+    /// Point the engine at this workspace: its investigation project ([`project::investigation`]) and inbox.
     fn attach(&self, ws: &Workspace) -> Result<(), ToolError> {
-        let dir = ws.investigation_dir();
-        let project = Project::open(&dir).or_else(|_| Project::create(&dir, &ws.manifest.name, Purpose::default()))?;
+        let project = project::investigation(ws)?;
         let mut s = self.engine.session();
         s.open_project(project)?;
         s.ext.insert(Arc::new(InboxDir(ws.inbox_dir())));
@@ -750,12 +756,18 @@ impl Worker {
         })
     }
 
+    /// The game engines on this computer (the session's engine store, then the usual places), or in
+    /// the run's stand-in places.
+    fn engines_here(&self) -> game::Inventory {
+        let places = self.engine_places.clone().unwrap_or_else(|| game::Places::here(self.engine.session().settings.engine_store_dir()));
+        game::inventory(&places)
+    }
+
     /// The editor for a game-engine stack. An engine that isn't ready stops the run before any
     /// work, with the way to get it.
     fn find_editor(&self, stack: &str) -> Result<Option<PathBuf>, ToolError> {
         let Some(b) = game::Builder::from_stack(stack).filter(|b| *b != game::Builder::Rust) else { return Ok(None) };
-        let store = self.engine.session().settings.engine_store_dir();
-        let inv = game::inventory(&game::Places::here(store));
+        let inv = self.engines_here();
         match inv.best(b) {
             Some(i) if inv.ready(b) => Ok(Some(i.program.clone())),
             _ => Err(ToolError::new(ErrorCode::BadSettings, format!("{} isn't ready on this computer yet.", b.name())).with_remediation(
@@ -849,8 +861,20 @@ impl Worker {
                 .with_remediation("Describe what to make: a website, an app or a game.")
         };
         if ws.manifest.stack.is_empty() {
-            ws.manifest.stack = project::first_stack(&opts.kinds, ws, run_deep).ok_or_else(no_kind)?.to_string();
+            let first = project::first_stack(&opts.kinds, ws, run_deep).ok_or_else(no_kind)?;
+            // A game whose request names a technology the table has no stack for is built with what it
+            // names rather than its default engine, whatever is installed (R2.7). Not a person's own
+            // project: that keeps what its files are built with.
+            let m = &ws.manifest;
+            let skipped =
+                game::Builder::from_stack(first).filter(|_| !m.app_in_root).and_then(|b| project::listed_tech_instead(&opts.kinds, &m.request, &m.target, b));
+            ws.manifest.stack = if skipped.is_some() { stacks::BUILDERS_CHOICE } else { first }.to_string();
             ws.save()?;
+            if let Some(s) = skipped {
+                // A step line, so the CLI prints it and the feed keeps it where the stop used to be.
+                self.emit(RunEvent::Step { step: Step::Study, text: s.notice() });
+                s.journal(ws)?;
+            }
         }
         let kind = opts.kinds.detect(&ws.manifest.request, &ws.manifest.target, &ws.manifest.stack).ok_or_else(no_kind)?;
         self.self_check = Some((kind.clone(), opts.good_enough));

@@ -78,7 +78,12 @@ impl CraftApp {
         // Games are built with an engine, unless the request names another way to build; one that
         // isn't here yet is got first, then this starts.
         let game = make::is_game(&self.kinds, &draft);
-        let engine = if game { crate::engine_ui::chosen(&self.kinds, &draft) } else { None };
+        // A game naming a technology from the stack table's list is built with it rather than its
+        // default engine, whatever is installed, as Make said (R2.7). A folder that already holds
+        // a project keeps its stack instead: that's found on the worker below, which drops the
+        // skip then.
+        let skipped = if game { crate::engine_ui::skipped(&self.kinds, &draft) } else { None };
+        let engine = if game && skipped.is_none() { crate::engine_ui::chosen(&self.kinds, &draft) } else { None };
         if let Some(b) = engine
             && !self.game_engines.as_ref().is_some_and(|i| i.ready(b))
         {
@@ -100,6 +105,8 @@ impl CraftApp {
         let own = draft.folder.as_deref().and_then(Path::file_name).filter(|_| draft.mine);
         let name = own.map_or_else(|| suggest_name(&request, &target), |n| n.to_string_lossy().into_owned());
         let (projects_dir, budget, generate) = (self.settings.projects_dir(), self.settings.assets.budget(), game && draft.generate_assets);
+        // Said once the project is made, and only for a new one (see `created`).
+        let notice = skipped.as_ref().map(crate::engine_ui::skipped_started);
         // The folder, its records and copies of the pictures are written on a worker (a slow or
         // network drive must not freeze the window); `created` starts the build.
         self.creating = Some(self.jobs.spawn(tr("Create the project"), false, move |_| {
@@ -112,15 +119,20 @@ impl CraftApp {
             let mut ws = created.map_err(|e| e.for_people())?;
             // A new project starts with the stack, asset budget and builder from Make; a folder
             // that already held one keeps what the person set there.
-            rebuild::project::apply_new_project_fields(&mut ws, attached, engine.map(|b| b.stack()), budget, generate, draft.ai.as_deref())
-                .map_err(|e| e.for_people())?;
+            let stack = if skipped.is_some() { Some(rebuild::stacks::BUILDERS_CHOICE) } else { engine.map(|b| b.stack()) };
+            rebuild::project::apply_new_project_fields(&mut ws, attached, stack, budget, generate, draft.ai.as_deref()).map_err(|e| e.for_people())?;
+            // The run finds the stack already set, so the skip is recorded here, as the run would.
+            if let Some(s) = skipped.filter(|_| !attached) {
+                s.journal(&ws).map_err(|e| e.for_people())?;
+            }
             let pictures = ws.add_references(&draft.pictures).err().map(|e| e.message);
-            Ok(Done::Created { ws: Box::new(ws), request, backend, pictures, attached })
+            let notice = notice.filter(|_| !attached);
+            Ok(Done::Created { ws: Box::new(ws), request, backend, pictures, attached, notice })
         }));
     }
 
     /// A project from [`Self::start_make`] was made: its build starts.
-    pub(crate) fn created(&mut self, ws: Workspace, request: String, backend: String, pictures: Option<String>, attached: bool) {
+    pub(crate) fn created(&mut self, ws: Workspace, request: String, backend: String, pictures: Option<String>, attached: bool, notice: Option<String>) {
         if let Some(e) = pictures {
             self.toast(format!("{} {}", tr("Couldn't add the pictures:"), e), true);
         }
@@ -156,6 +168,12 @@ impl CraftApp {
             self.state.feed = vec![FeedItem::User(UserItem::Text(request.clone()))];
         }
         self.start_run(ws, Some(backend), message.clone(), message, Vec::new());
+        // Said after the start, which may say the build waits its turn: a confirmation takes the
+        // place of the one before it, so a queued build's line carries the notice too.
+        if let Some(n) = notice {
+            let text = if self.runs.position(&root).is_some() { format!("{n} {}", tr("Another build is working, so this one waits its turn.")) } else { n };
+            self.toast(text, false);
+        }
         // Keep an edited draft; clear it only once this request is running or queued.
         if self.state.make.request.trim() == request && (self.runs.is_running(&root) || self.runs.position(&root).is_some()) {
             self.state.make = MakeDraft::default();
@@ -851,10 +869,16 @@ impl CraftApp {
     }
 }
 
+/// Whether a project is built as a game, so its pictures and models may be generated: the kind the
+/// run picks, whatever the stack (an engine, or Builder's choice for a game naming Three.js, R2.7).
+fn builds_a_game(kinds: &KindRegistry, m: &craft_anything_engine::workspace::Manifest) -> bool {
+    kinds.detect(&m.request, &m.target, &m.stack).is_some_and(|k| k.id() == craft_anything_ai::rebuild::GameKind::ID)
+}
+
 /// A game project's generated-assets switch, and "7 · $2.10 of $5.00" once it's on or assets were made.
 fn asset_line(app: &mut CraftApp, ui: &mut Ui, ws: &Workspace) {
     let t = Tokens::get(ui.ctx());
-    if craft_anything_engines::game::Builder::from_stack(&ws.manifest.stack).is_none() {
+    if !builds_a_game(&app.kinds, &ws.manifest) {
         return;
     }
     widgets::caption(ui, "Generated assets");
@@ -981,7 +1005,7 @@ fn side(app: &mut CraftApp, ui: &mut Ui, ws: &Workspace) {
     steps(app, ui, ws);
     ui.add_space(theme::space::LG);
     open_questions(app, ui);
-    if craft_anything_engines::game::Builder::from_stack(&m.stack).is_some() {
+    if builds_a_game(&app.kinds, m) {
         widgets::card(&t).inner_margin(theme::pad::ROW).show(ui, |ui| {
             ui.set_width(ui.available_width());
             asset_line(app, ui, ws);
@@ -2580,7 +2604,7 @@ mod tests {
         let ws = Workspace::create(d.path(), "Notes", "A notes app", TargetRef::None).unwrap();
         let mut app = crate::demo::app(crate::demo::engine(craft_anything_engine::Mode::Beginner, true));
         assert!(app.projects.is_empty());
-        app.created(ws.clone(), "A notes app".into(), "test-backend".into(), None, false);
+        app.created(ws.clone(), "A notes app".into(), "test-backend".into(), None, false, None);
         assert!(!app.projects.is_empty(), "project is added to app.projects immediately");
         assert_eq!(app.projects[0].root, ws.root);
     }
@@ -2628,7 +2652,7 @@ mod tests {
         cfg.upsert(BackendEntry { config: local, options: Default::default() });
         app.hub.save_config(&cfg).unwrap();
         // "Off" isn't a backend: the attached project must use the builder it saved instead.
-        app.created(ws.clone(), "add a jump".into(), "Off".into(), None, true);
+        app.created(ws.clone(), "add a jump".into(), "Off".into(), None, true, None);
         assert!(app.state.feed.iter().any(|i| matches!(i, FeedItem::User(u) if u.text() == "earlier message")), "the saved feed is kept: {:?}", app.state.feed);
         assert!(app.state.feed.iter().any(|i| matches!(i, FeedItem::User(u) if u.text() == "add a jump")), "the new request is appended: {:?}", app.state.feed);
         let saved_feed = craft_anything_ai::rebuild::feed::load(&ws);

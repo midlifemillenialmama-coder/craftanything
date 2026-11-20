@@ -27,3 +27,5 @@ Stopped the sign-in.
 Wait until the new project is made.
 This project's usage record couldn't be read, so what its builds spent isn't known.
 Arguments in square brackets must be a list of quoted words, like ["--port", "8080"]. Or leave out the brackets and separate them with spaces.
+Your request names {named}, so this game is built with it rather than {engine}. To build it with {engine}, choose {engine} above.
+Your request names {named}, so this game is built with it rather than {engine}. To build it with {engine}, start a new project and choose {engine} under "Build with".

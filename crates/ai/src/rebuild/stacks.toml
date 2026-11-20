@@ -18,6 +18,13 @@
 # `site` marks a stack whose build is a website, so a project built with it and with nothing to
 # recreate is one, whatever its request says.
 #
+# `named_by` lists, for a game engine that must be installed to build with (Unity, Unreal, Godot),
+# the words that name it anywhere in a request, alone or with "engine", a version or "2d"/"3d"
+# after it in the same word ("unity", "Unity3D", "UE5", "godot4", "UnityEngine"). A new game naming one isn't moved to Builder's choice by a
+# `[[game_tech]]` it also names: it keeps the stack it would get anyway (R2.7). Stacks that need
+# no engine installed (Phaser, Bevy, Rust) have none, so "a Phaser game with WebGL" is built with
+# Builder's choice, which uses what the request names.
+#
 # A `[[library]]` is a component or styling library asked for on top of a stack ("shadcn",
 # "tailwind"): its `steps` are added to the stack's for the `stacks` it works with.
 #
@@ -98,18 +105,21 @@ steps = "Use Rust with eframe/egui for the window and UI. Create a cargo project
 [[stack]]
 name = "Unity"
 engine = "unity"
+named_by = ["unity"]
 found_by = ["ProjectSettings/ProjectVersion.txt"]
 steps = "Use Unity (the editor is {editor}). Create the project in app/: Assets/, Packages/manifest.json (built-in packages unless you need more) and ProjectSettings/ProjectVersion.txt with the editor's version. Write the game in C# under Assets/Scripts/. Scenes are hard to write by hand, so build them from code: an editor script Assets/Editor/CraftBuild.cs with a static `Build()` method that creates the scene(s) under Assets/Scenes/, adds them to the build settings and builds a {player} player to app/Build/Game.{ext} with BuildPipeline.BuildPlayer, calling EditorApplication.Exit(1) when the build fails. Build with `\"{editor}\" -batchmode -quit -nographics -projectPath app -executeMethod CraftBuild.Build -logFile app/Logs/build.log` and read that log when it fails. The first run imports the project and takes a few minutes."
 
 [[stack]]
 name = "Unreal Engine"
 engine = "unreal"
+named_by = ["unreal", "ue"]
 found_by = ["*.uproject"]
 steps = "Use Unreal Engine (the editor is {editor}) with C++: Blueprint and level files are binary and can't be written by hand. Create app/Game.uproject (its EngineAssociation set to the installed version, one C++ module) and Source/Game/ with the module, its Build.cs and the Target.cs files. Make levels from code (a GameMode that spawns the geometry, lights and actors at start, with a small empty default map) rather than editing .umap files. Craft Anything packages it with Unreal's BuildCookRun into app/Build after each round; the first package takes a long time, so compile your C++ with the engine's build tool first and fix errors there."
 
 [[stack]]
 name = "Godot"
 engine = "godot"
+named_by = ["godot"]
 found_by = ["project.godot"]
 steps = "Use Godot (the editor is {editor}) with GDScript. Create the project in app/: project.godot (config_version=5, with run/main_scene set), scenes as .tscn text files and scripts as .gd files; Godot's files are plain text, so write scenes directly. Check it with `\"{editor}\" --headless --path app --import` and then `\"{editor}\" --headless --path app --quit-after 120`, and fix every SCRIPT ERROR or ERROR line."
 
@@ -124,3 +134,84 @@ name = "Tailwind CSS"
 asked_by = [" tailwind ", " tailwindcss "]
 stacks = ["Next.js + TypeScript", "React + TypeScript (Vite)", "Electron", "Builder's choice"]
 steps = "Style with Tailwind CSS (v4, through @tailwindcss/postcss for Next.js or @tailwindcss/vite for Vite), with the original's colours, fonts, text sizes, spacing and breakpoints from capture.json as theme tokens in an @theme block."
+
+# A `[[game_tech]]` is a game technology the table has no stack for (Three.js, Pygame…). A new game
+# whose request names one and no engine (`named_by`) is built with "Builder's choice", so with what
+# it names, instead of its default engine, whatever is installed (R2.7). `said_as` phrases are matched
+# like `asked_by`, as whole words. Leave out words that also mean ordinary things ("canvas",
+# "love", "love 2d", "babylon", "pixi" alone): a false match takes away the engine the person may want.
+[[game_tech]]
+name = "Three.js"
+said_as = [" three js ", " threejs "]
+
+[[game_tech]]
+name = "Babylon.js"
+said_as = [" babylon js ", " babylonjs "]
+
+[[game_tech]]
+name = "PixiJS"
+said_as = [" pixijs ", " pixi js "]
+
+[[game_tech]]
+name = "PlayCanvas"
+said_as = [" playcanvas "]
+
+[[game_tech]]
+name = "Kaboom.js"
+said_as = [" kaboom js ", " kaboomjs ", " kaplay "]
+
+[[game_tech]]
+name = "Excalibur.js"
+said_as = [" excalibur js ", " excaliburjs "]
+
+[[game_tech]]
+name = "raylib"
+said_as = [" raylib "]
+
+[[game_tech]]
+name = "LÖVE"
+said_as = [" löve ", " love2d ", " löve2d "]
+
+[[game_tech]]
+name = "Pygame"
+said_as = [" pygame "]
+
+[[game_tech]]
+name = "MonoGame"
+said_as = [" monogame "]
+
+[[game_tech]]
+name = "libGDX"
+said_as = [" libgdx "]
+
+[[game_tech]]
+name = "SDL"
+said_as = [" sdl ", " sdl2 ", " sdl 2 ", " sdl3 ", " sdl 3 "]
+
+[[game_tech]]
+name = "SFML"
+said_as = [" sfml "]
+
+[[game_tech]]
+name = "HTML5"
+said_as = [" html5 ", " html 5 "]
+
+[[game_tech]]
+name = "WebGL"
+said_as = [" webgl "]
+
+[[game_tech]]
+name = "p5.js"
+said_as = [" p5 js ", " p5js "]
+
+[[game_tech]]
+name = "Pyxel"
+said_as = [" pyxel "]
+
+[[game_tech]]
+name = "Ebitengine"
+said_as = [" ebitengine ", " ebiten "]
+
+[[game_tech]]
+name = "HaxeFlixel"
+said_as = [" haxeflixel "]

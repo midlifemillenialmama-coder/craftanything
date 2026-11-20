@@ -1585,9 +1585,29 @@ Owner: open · Status: in progress
 Owner: open · Status: in progress
 - [x] Recognize Phaser and Bevy requests in the stack catalogue so Make can start those games without a Unity, Unreal or Godot editor.
       — claimed: Afloat16, branch feature/r2.7-phaser-bevy-game-stacks
-- [ ] Make: a game whose request names a technology the stack table doesn't know (Phaser, Bevy…)
+- [ ] Make: a game whose request names a technology the stack table doesn't know (Three.js, Pygame…)
       still needs the default engine installed to start, though the builder is told to use what
-      was named; ask the person, or let such a game start without an engine
+      was named; ask the person, or let such a game start without an engine. Partly done (below):
+      a technology on the `[[game_tech]]` list is built with what's named; one that isn't listed
+      still gets the default engine
+- [x] A new game whose request names a game technology from `[[game_tech]]` in `stacks.toml`
+      (Three.js, Pygame, raylib…) and no engine that must be installed is built with "Builder's
+      choice", so with what it names, rather than its default engine, whatever is installed
+      (docs/pitfalls.md, "A default given as an order"); the run and Make say which engine was
+      skipped and how to build with it. "a Phaser game with WebGL" and "a Rust game with SDL" are
+      built with Builder's choice too (Phaser and Rust need no engine installed). A request that
+      names nothing, or names Unity, Unreal or Godot by one of their words ("Unity3D", "UE5",
+      "UnityEngine"), still gets what it got before
+      — claimed: Fadlalla-ai, branch bugfix/r2.7-listed-game-tech
+- [ ] A game stack named only as a word still gets the game's default engine: "a Godot HTML5
+      game", "a Godot game" and "an Unreal game" are built with Unity, and "a Phaser game" (no
+      listed technology) too; only "in/with/using <engine>" and the table's `asked_by` phrases
+      name a stack. The same pitfall (docs/pitfalls.md, "A default given as an order"). Let a
+      stack named as a word pick that stack. Tried for #2175 and taken out: a word rule kept
+      catching phrasing it shouldn't ("a game about unity", "Remake this Unreal game in
+      Three.js", "a bevy of games"), and a wrong pick builds with a stack nobody asked for. Decide
+      with the maintainers how a stack is named (which words, and whether "a Rust game" means the
+      language), and what a request in another language does
 - [x] The website check's missing-site note names every place `site_dir` accepts (dist/, build/,
       out/, or a plain index.html with no package.json) and the app's real place, "app/" or "the
       project folder" (#494)

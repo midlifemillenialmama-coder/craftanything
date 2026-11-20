@@ -11,6 +11,8 @@ use crate::state::{MakeDraft, Modal, Screen};
 use crate::theme::{self, Tokens};
 use crate::{CraftApp, Done, icons, widgets};
 use craft_anything_ai::rebuild::KindRegistry;
+use craft_anything_ai::rebuild::project::{self, EngineSkipped};
+use craft_anything_engine::workspace::ExistingFiles;
 use craft_anything_engine::{CallOptions, Caller};
 use craft_anything_engines::assets::{AssetProvider, AssetProviders, fal};
 use craft_anything_engines::game::{self, Builder, Inventory};
@@ -618,16 +620,46 @@ pub fn chosen(kinds: &KindRegistry, d: &MakeDraft) -> Option<Builder> {
     }
 }
 
+/// When this draft's game would take its default engine and the request names a game technology
+/// from the stack table's list: it's built with the builder's choice instead, whatever engines are
+/// installed (R2.7). Nothing changes when the person picked an engine, edits their own project in
+/// place, or the request names one.
+pub fn skipped(kinds: &KindRegistry, d: &MakeDraft) -> Option<EngineSkipped> {
+    // A project edited in place keeps what its files need, as the run does.
+    if d.builder.is_some() || d.existing == Some(ExistingFiles::Edit) || !crate::make::is_game(kinds, d) {
+        return None;
+    }
+    let engine = Builder::for_game(d.found.as_ref().map(|f| f.engine));
+    project::listed_tech_instead(kinds, &d.request, &crate::make::resolve_target(d), engine)
+}
+
+/// What Make says under "Build with" when [`skipped`] holds, with how to build with the engine after all.
+pub fn skipped_notice(s: &EngineSkipped) -> String {
+    trf(
+        "Your request names {named}, so this game is built with it rather than {engine}. To build it with {engine}, choose {engine} above.",
+        &[("engine", s.engine.name()), ("named", s.named)],
+    )
+}
+
+/// What the app says once Start has gone ahead without the engine (Make may be gone by then).
+pub fn skipped_started(s: &EngineSkipped) -> String {
+    trf(
+        "Your request names {named}, so this game is built with it rather than {engine}. To build it with {engine}, start a new project and choose {engine} under \"Build with\".",
+        &[("engine", s.engine.name()), ("named", s.named)],
+    )
+}
+
 /// "Build with" on Make: what made the original, the engine we'll use, and whether it's here.
 pub fn build_with(app: &mut CraftApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
-    let b = chosen(&app.kinds, &app.state.make);
+    let skip = skipped(&app.kinds, &app.state.make);
+    let b = if skip.is_some() { None } else { chosen(&app.kinds, &app.state.make) };
     if let Some(f) = app.state.make.found.clone() {
         ui.horizontal_wrapped(|ui| {
             icons::show(ui, "puzzle", theme::icon::MD, t.accent_ink);
             ui.label(RichText::new(trf("Made with {engine}", &[("engine", &f.label())])).font(theme::semibold(theme::BODY)));
         });
-        if !matches!(f.engine, game::Made::Unity | game::Made::Unreal | game::Made::Godot) {
+        if skip.is_none() && !matches!(f.engine, game::Made::Unity | game::Made::Unreal | game::Made::Godot) {
             ui.label(
                 RichText::new(trf("Craft Anything can't build with {engine}, so Unity is the closest match.", &[("engine", f.engine.name())]))
                     .color(t.text_dim)
@@ -648,6 +680,13 @@ pub fn build_with(app: &mut CraftApp, ui: &mut Ui) {
     ui.add_space(theme::space::SM);
     match b {
         Some(b) => status_line(app, ui, b, true),
+        None if skip.is_some() => {
+            let text = skip.as_ref().map(skipped_notice).unwrap_or_default();
+            ui.horizontal_wrapped(|ui| {
+                icons::show(ui, "info", theme::icon::MD, t.accent_ink);
+                ui.label(RichText::new(text).color(t.text_dim).size(theme::SMALL));
+            });
+        }
         None => {
             let named = app.kinds.named(&app.state.make.request, &crate::make::resolve_target(&app.state.make)).unwrap_or_default();
             ui.horizontal_wrapped(|ui| {
@@ -1014,6 +1053,57 @@ mod tests {
         assert_eq!(win_title, "Add Visual Studio's C++ tools");
         assert_eq!(win_page, Some(game::VISUAL_STUDIO_PAGE));
         assert!(unreal_tools_missing("windows").contains("Visual Studio"));
+    }
+
+    /// R2.7: Make builds a game that names a listed technology with it rather than its default engine,
+    /// whatever is installed, and says so; every other case keeps the engine.
+    #[test]
+    fn make_builds_a_game_with_the_listed_technology_it_names() {
+        let kinds = KindRegistry::built_in();
+        let draft = |r: &str| MakeDraft { request: r.into(), ..Default::default() };
+        let three = draft("Make a space shooter game using Three.js");
+        let s = skipped(&kinds, &three).expect("Three.js is named");
+        assert_eq!((s.engine, s.named), (Builder::Unity, "Three.js"));
+        assert_eq!(
+            skipped_notice(&s),
+            "Your request names Three.js, so this game is built with it rather than Unity. To build it with Unity, choose Unity above."
+        );
+        let mut picked = three.clone();
+        picked.builder = Some(Builder::Unity);
+        assert_eq!(skipped(&kinds, &picked), None, "the person picked Unity");
+        for r in [
+            "Make a space shooter game",
+            "Make a game in Godot using Three.js",
+            "Make a Unity WebGL game",
+            "Make a game in Phaser with WebGL",
+            "Make a notes app with WebGL",
+        ] {
+            assert_eq!(skipped(&kinds, &draft(r)), None, "{r}");
+        }
+        let mut own = three.clone();
+        own.mine = true;
+        own.existing = Some(ExistingFiles::Edit);
+        assert_eq!(skipped(&kinds, &own), None, "a project edited in place keeps what its files need");
+        own.existing = Some(ExistingFiles::StartFrom);
+        assert!(skipped(&kinds, &own).is_some(), "files to start from: as the run decides, it's a new game");
+        assert!(skipped_started(&s).ends_with("start a new project and choose Unity under \"Build with\"."), "{}", skipped_started(&s));
+        let mut unreal_game = draft("Make a shooter game with WebGL");
+        unreal_game.found = Some(game::Found { engine: game::Made::Unreal, version: None, clue: "x.uproject".into(), note: None });
+        assert_eq!(skipped(&kinds, &unreal_game).map(|s| s.engine), Some(Builder::Unreal), "the original's engine is the one skipped");
+        let mut ticked = draft("Make my own version with Three.js");
+        ticked.game = true;
+        assert_eq!(skipped(&kinds, &ticked), None, "only a request that reads as a game: Builder's choice alone wouldn't keep it one");
+        // As the run decides: a stack that needs no engine doesn't keep the default; an engine named
+        // by its words does, and so does a game naming nothing.
+        for (r, named) in
+            [("Make a Phaser game with WebGL", Some("WebGL")), ("Make a Phaser3 game with WebGL", Some("WebGL")), ("Make a Rust game with SDL", Some("SDL"))]
+        {
+            assert_eq!(skipped(&kinds, &draft(r)).map(|s| s.named), named, "{r}");
+        }
+        for r in ["Make a Unity3D game with WebGL", "Make a Godot HTML5 game", "Make a space shooter game", "Remake this Unreal game in Three.js"] {
+            assert_eq!(skipped(&kinds, &draft(r)), None, "{r}");
+            assert_eq!(chosen(&kinds, &draft(r)), Some(Builder::Unity), "{r}: main's choice");
+        }
     }
 
     #[test]

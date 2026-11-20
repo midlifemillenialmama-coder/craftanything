@@ -278,6 +278,9 @@ pub enum Done {
         pictures: Option<String>,
         /// The folder already held a project: the request is its follow-up, not a new project's.
         attached: bool,
+        /// What to tell the person once it's made (a new game built with the technology its
+        /// request names rather than an engine); never for a folder that already held a project.
+        notice: Option<String>,
     },
     /// A message's pictures were copied into its project (see `CraftApp::deliver`).
     Attached {
@@ -1639,7 +1642,7 @@ impl CraftApp {
             }
             Done::Facts(f) => self.facts_read(job, Some(f)),
             Done::PicturesAdded(added) => self.pictures_added(added),
-            Done::Created { ws, request, backend, pictures, attached } => self.created(*ws, request, backend, pictures, attached),
+            Done::Created { ws, request, backend, pictures, attached, notice } => self.created(*ws, request, backend, pictures, attached, notice),
             Done::Thumb { path, image } => self.thumb_ready(path, image),
             Done::Preview { path, image } => self.preview_ready(path, image),
             Done::Tool { tool, params, route, result } => self.tool_done(tool, params, route, result),

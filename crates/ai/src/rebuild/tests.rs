@@ -62,6 +62,72 @@ fn stack_choice() {
     assert_eq!(kind_of("Copy this tool", &folder, "Rust + egui (eframe)"), "app", "the app stack stays an app");
 }
 
+/// R2.7: a game naming a technology from the stack table's list is built with it rather than its
+/// default engine, whatever is installed (docs/pitfalls.md, "A default given as an order"), unless
+/// an engine that must be installed (Unity, Unreal, Godot) is named too.
+#[test]
+fn a_listed_technology_wins_over_the_default_engine() {
+    use game::Builder::{Godot, Rust, Unity};
+    let kinds = KindRegistry::built_in();
+    let skip = |request: &str, engine: game::Builder| project::listed_tech_instead(&kinds, request, &TargetRef::None, engine).map(|s| (s.engine, s.named));
+    assert_eq!(skip("Make a space shooter game using Three.js", Unity), Some((Unity, "Three.js")));
+    assert_eq!(skip("Make a platformer game with PixiJS", Unity), Some((Unity, "PixiJS")));
+    assert_eq!(skip("Make a snake game with Pygame", Unity), Some((Unity, "Pygame")));
+    assert_eq!(skip("Make a continue-screen game with WebGL", Unity), Some((Unity, "WebGL")), "\"ue\" inside a word isn't Unreal");
+    assert_eq!(
+        skip("Remake this game in Babylon.js", Godot),
+        Some((Godot, "Babylon.js")),
+        "a default other than Unity (the app's from the original's files) is skipped the same way"
+    );
+    for request in ["Make a space shooter game", "Make a tower defense game with zombies", "Make a game using the arrow keys to move"] {
+        assert_eq!(skip(request, Unity), None, "{request}: names nothing, so the engine is still offered");
+    }
+    assert_eq!(skip("Make a game in Godot using Three.js", Unity), None, "a named engine wins");
+    assert_eq!(skip("Make a game with Unity and WebGL", Unity), None);
+    for request in [
+        "Make a Unity WebGL game",
+        "Make a Unity3D game with WebGL",
+        "Make a Unity2D platformer game with WebGL",
+        "Make a Godot HTML5 game",
+        "Make a Godot4 game with WebGL",
+        "Make an Unreal Engine 5 game with three.js",
+        "Make a UE5 game with WebGL",
+        "an unreal game in WebGL",
+        "Remake this Unreal game in Three.js",
+        "Make a UnityEngine game with WebGL",
+        "Make an UnrealEngine5 game with three.js",
+    ] {
+        assert_eq!(skip(request, Unity), None, "{request}: an engine named by its words leaves main's choice alone");
+    }
+    // Stacks that need no engine installed don't keep the default: Builder's choice uses them.
+    for (request, named) in [
+        ("Make a Phaser game with WebGL", "WebGL"),
+        ("Make a Phaser3 game with WebGL", "WebGL"),
+        ("Make a Rust game with SDL", "SDL"),
+        ("Make a Bevy game with WebGL", "WebGL"),
+        ("Make a macroquad game with SDL", "SDL"),
+    ] {
+        assert_eq!(skip(request, Unity), Some((Unity, named)), "{request}");
+    }
+    assert_eq!(skip("Make my own version with Three.js", Unity), None, "only a request that reads as a game");
+    assert_eq!(skip("Make a game in Phaser with WebGL", Unity), None, "a named stack from the table wins");
+    assert_eq!(skip("Make a Python snake game with Pygame", Unity), Some((Unity, "Pygame")), "a stack only as a word: the builder uses what's named");
+    assert_eq!(skip("Make a snake game in Python with Pygame", Unity), None);
+    assert_eq!(skip("Make a game with SDL", Rust), None, "Rust needs no editor");
+}
+
+#[test]
+fn the_skipped_engine_notice_says_how_to_build_with_it_instead() {
+    let s = project::EngineSkipped { engine: game::Builder::Unity, named: "Three.js" };
+    assert_eq!(
+        s.notice(),
+        "Your request names Three.js, so this game is built with it rather than Unity. To build it with Unity, start a new project with \"Build with\" set to Unity (`--build-with unity` in the CLI)."
+    );
+    let s = project::EngineSkipped { engine: game::Builder::Unreal, named: "WebGL" };
+    assert!(s.notice().contains("`--build-with unreal`"), "{}", s.notice());
+    assert!(project::build_with("unreal").is_ok(), "the id the notice names is one --build-with takes");
+}
+
 #[test]
 fn the_word_player_alone_is_not_a_game() {
     for request in [
@@ -545,6 +611,7 @@ fn notes_added_while_it_works_reach_the_agent_at_its_next_step() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        engine_places: None,
         assets: false,
         usage: None,
         self_check: None,
@@ -1494,6 +1561,7 @@ fn an_api_backend_builds_with_the_build_tools() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        engine_places: None,
         assets: false,
         usage: None,
         self_check: None,
@@ -1624,6 +1692,7 @@ fn the_mechanics_sheet_is_required_without_claiming_effective_behavior() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        engine_places: None,
         assets: false,
         usage: None,
         self_check: None,
@@ -1883,6 +1952,163 @@ mod picking_up_a_build {
         let _ = try_it(&b, &ws);
         let keys = b.hub.engine.session().ext.get::<craft_anything_engine::tools::asset_tools::AssetKeys>().unwrap_or_default();
         assert_eq!(keys.get("fal"), Some("k-1"));
+    }
+
+    /// R2.7: run a new game from `request` until it says a step or ends, looking for engines only in
+    /// `places` (stand-ins, so it decides the same on every machine); the stop or notice it gave and
+    /// the stack it saved.
+    fn start_game(b: &Bench, request: &str, places: game::Places) -> (String, String) {
+        let ws = Workspace::create(&b.projects, "g", request, TargetRef::None).unwrap();
+        let opts = RunOptions { backend: Some("Stand-in".into()), engine_places: Some(places), ..RunOptions::default() };
+        let run = RebuildRun::start(&b.hub, Workspace::open(&ws.root).unwrap(), opts).unwrap();
+        let began = Instant::now();
+        let said = loop {
+            assert!(began.elapsed() < Duration::from_secs(30), "the run said nothing");
+            match run.rx.recv_timeout(Duration::from_secs(30)) {
+                Ok(RunEvent::Step { text, .. }) if text.starts_with("Your request names") || text.contains("isn't ready") => break text,
+                Ok(RunEvent::Finished { message, .. }) => break message,
+                Ok(_) => {}
+                Err(e) => panic!("the run went away: {e}"),
+            }
+        };
+        run.stop();
+        while !matches!(run.rx.recv_timeout(Duration::from_secs(30)), Ok(RunEvent::Finished { .. }) | Err(_)) {}
+        (said, Workspace::open(&ws.root).unwrap().manifest.stack)
+    }
+
+    /// No game engine anywhere: an empty engine store, and PATH not searched.
+    fn no_engines(d: &std::path::Path) -> game::Places {
+        game::Places { store: d.join("store"), ..Default::default() }
+    }
+
+    /// Unity 6 installed where the engine search looks (and nothing else).
+    fn unity_installed(d: &std::path::Path) -> game::Places {
+        let editor = d.join("pf/Unity/Hub/Editor/6000.0.23f1/Editor/Unity.exe");
+        std::fs::create_dir_all(editor.parent().unwrap()).unwrap();
+        std::fs::write(&editor, b"").unwrap();
+        let places = game::Places { program_files: vec![d.join("pf")], ..no_engines(d) };
+        assert!(game::inventory(&places).ready(game::Builder::Unity), "the stand-in Unity is found");
+        places
+    }
+
+    /// The app records the skip when Make creates the project, before any run: the run still opens
+    /// that investigation afterwards (it can't make one in a folder already holding a journal) and
+    /// doesn't record the skip again, since the stack is set.
+    #[test]
+    fn a_skip_journaled_before_the_run_leaves_the_run_its_investigation() {
+        let b = bench();
+        let mut ws = Workspace::create(&b.projects, "g", "Make a space shooter game using Three.js", TargetRef::None).unwrap();
+        ws.manifest.stack = stacks::BUILDERS_CHOICE.into();
+        ws.save().unwrap();
+        project::EngineSkipped { engine: game::Builder::Unity, named: "Three.js" }.journal(&ws).unwrap();
+        let opts = RunOptions { backend: Some("Stand-in".into()), ..RunOptions::default() };
+        let run = RebuildRun::start(&b.hub, Workspace::open(&ws.root).unwrap(), opts).unwrap();
+        // The first step or the end: a run that can't open its investigation ends at once.
+        let first = loop {
+            match run.rx.recv_timeout(Duration::from_secs(30)) {
+                Ok(RunEvent::Step { text, .. }) => break Ok(text),
+                Ok(RunEvent::Finished { message, .. }) => break Err(message),
+                Ok(_) => {}
+                Err(e) => panic!("the run went away: {e}"),
+            }
+        };
+        run.stop();
+        while !matches!(run.rx.recv_timeout(Duration::from_secs(30)), Ok(RunEvent::Finished { .. }) | Err(_)) {}
+        assert!(first.is_ok(), "the run stopped: {first:?}");
+        let journal = std::fs::read_dir(ws.investigation_dir().join("journal"))
+            .unwrap()
+            .flatten()
+            .map(|e| std::fs::read_to_string(e.path()).unwrap())
+            .collect::<String>();
+        assert_eq!(journal.matches(r#""action":"engine_skipped""#).count(), 1, "{journal}");
+    }
+
+    #[test]
+    fn a_game_naming_a_listed_technology_is_built_with_it_whatever_is_installed() {
+        let d = tempfile::tempdir().unwrap();
+        for (places, here) in [(no_engines(d.path()), "no engine"), (unity_installed(d.path()), "Unity installed")] {
+            let b = bench();
+            let (said, stack) = start_game(&b, "Make a space shooter game using Three.js", places);
+            assert_eq!(stack, stacks::BUILDERS_CHOICE, "{here}");
+            assert!(said.starts_with("Your request names Three.js, so this game is built with it rather than Unity."), "{here}: {said}");
+            let journal = std::fs::read_dir(Workspace::open(&b.projects.join("g")).unwrap().investigation_dir().join("journal"))
+                .unwrap()
+                .flatten()
+                .map(|e| std::fs::read_to_string(e.path()).unwrap())
+                .collect::<String>();
+            assert!(journal.contains(r#""action":"engine_skipped""#) && journal.contains(r#""named":"Three.js""#), "{here}: {journal}");
+        }
+    }
+
+    /// Like [`start_game`], for a run that may neither stop nor give a notice: every step it says
+    /// until one comes after the stack is saved (the engine stop and the notice come right after
+    /// it), or until it ends.
+    fn steps_after_the_stack(b: &Bench, request: &str, places: game::Places) -> (Vec<String>, String) {
+        let ws = Workspace::create(&b.projects, "g", request, TargetRef::None).unwrap();
+        let opts = RunOptions { backend: Some("Stand-in".into()), engine_places: Some(places), ..RunOptions::default() };
+        let run = RebuildRun::start(&b.hub, Workspace::open(&ws.root).unwrap(), opts).unwrap();
+        let (began, mut said, mut seen_stack) = (Instant::now(), vec![], false);
+        loop {
+            assert!(began.elapsed() < Duration::from_secs(30), "the run said nothing more: {said:?}");
+            match run.rx.recv_timeout(Duration::from_secs(30)) {
+                Ok(RunEvent::Step { text, .. }) => {
+                    said.push(text);
+                    if seen_stack {
+                        break;
+                    }
+                    seen_stack = !Workspace::open(&ws.root).unwrap().manifest.stack.is_empty();
+                }
+                Ok(RunEvent::Finished { message, .. }) => {
+                    said.push(message);
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) => panic!("the run went away: {e}"),
+            }
+        }
+        run.stop();
+        while !matches!(run.rx.recv_timeout(Duration::from_secs(30)), Ok(RunEvent::Finished { .. }) | Err(_)) {}
+        (said, Workspace::open(&ws.root).unwrap().manifest.stack)
+    }
+
+    /// The requests R2.7's review asked about, each with no engine and with Unity installed: the
+    /// stack the run saves, whether it gives the skip notice, and whether it stops for an engine.
+    #[test]
+    fn each_reviewed_request_gets_the_same_stack_with_no_engine_and_with_unity_installed() {
+        let d = tempfile::tempdir().unwrap();
+        for (places, unity_here) in [(no_engines(d.path()), false), (unity_installed(d.path()), true)] {
+            for (request, stack, notice, stop) in [
+                ("Make a game using Three.js", stacks::BUILDERS_CHOICE, Some("Three.js"), None),
+                ("Make a Phaser game with WebGL", stacks::BUILDERS_CHOICE, Some("WebGL"), None),
+                ("Make a Phaser3 game with WebGL", stacks::BUILDERS_CHOICE, Some("WebGL"), None),
+                ("Make a Rust game with SDL", stacks::BUILDERS_CHOICE, Some("SDL"), None),
+                ("Make a Unity3D game with WebGL", "Unity", None, (!unity_here).then_some("Unity")),
+                // As on main: an engine named only as a word picks nothing yet (ROADMAP R2.7).
+                ("Make a Godot HTML5 game", "Unity", None, (!unity_here).then_some("Unity")),
+                ("Make a space shooter game", "Unity", None, (!unity_here).then_some("Unity")),
+            ] {
+                let here = if unity_here { "Unity installed" } else { "no engine" };
+                let (said, saved) = steps_after_the_stack(&bench(), request, places.clone());
+                assert_eq!(saved, stack, "{request}, {here}");
+                let told = said.iter().find_map(|s| s.strip_prefix("Your request names ")).map(|s| s.split(',').next().unwrap_or_default().to_string());
+                assert_eq!(told.as_deref(), notice, "{request}, {here}: {said:?}");
+                let stopped = ["Unity", "Godot"].into_iter().find(|e| said.iter().any(|s| s.contains(&format!("{e} isn't ready on this computer yet"))));
+                assert_eq!(stopped, stop, "{request}, {here}: {said:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_named_engine_or_a_game_naming_nothing_still_stops_for_its_engine() {
+        let d = tempfile::tempdir().unwrap();
+        let b = bench();
+        let (said, stack) = start_game(&b, "Make a game in Godot using Three.js", no_engines(d.path()));
+        assert_eq!(stack, "Godot");
+        assert!(said.contains("Godot isn't ready on this computer yet"), "{said}");
+        let b = bench();
+        let (said, stack) = start_game(&b, "Make a space shooter game", no_engines(d.path()));
+        assert_eq!(stack, "Unity");
+        assert!(said.contains("Unity isn't ready on this computer yet"), "{said}");
     }
 
     fn try_it(b: &Bench, ws: &Workspace) -> (bool, Vec<feed::FeedItem>) {
@@ -2944,6 +3170,7 @@ pub(crate) fn check_worker(ws: &Workspace, deep: bool) -> Worker {
         reset_progress_after_notes: false,
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        engine_places: None,
     }
 }
 
@@ -3540,6 +3767,7 @@ fn preparing_the_builders_agent_does_not_lock_up() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        engine_places: None,
         assets: false,
         usage: None,
         self_check: None,
@@ -3583,6 +3811,7 @@ fn the_run_answers_the_builders_own_check_during_its_turn() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        engine_places: None,
         assets: false,
         usage: None,
         self_check: Some((Arc::new(SheetKind), 90.0)),
@@ -3622,6 +3851,7 @@ fn a_stopped_build_answers_the_check_it_took() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        engine_places: None,
         assets: false,
         usage: None,
         self_check: Some((Arc::new(SheetKind), 90.0)),
@@ -3683,6 +3913,7 @@ fn decompiling_once_is_remembered_by_the_project() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        engine_places: None,
         assets: false,
         usage: None,
         self_check: None,
@@ -3748,6 +3979,7 @@ fn a_build_says_why_it_refused_a_tool_that_needs_consent() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        engine_places: None,
         assets: false,
         usage: None,
         self_check: None,
@@ -3961,6 +4193,7 @@ fn a_note_the_builder_took_at_a_step_joins_the_feed_and_isnt_sent_again() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        engine_places: None,
         assets: false,
         usage: None,
         self_check: None,
@@ -4409,6 +4642,7 @@ fn a_session_left_on_another_computer_starts_a_new_one_from_the_project() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        engine_places: None,
         assets: false,
         usage: None,
         self_check: None,
@@ -4465,6 +4699,7 @@ fn a_missing_session_with_nothing_to_start_from_is_said_plainly() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        engine_places: None,
         assets: false,
         usage: None,
         self_check: None,
@@ -4532,6 +4767,7 @@ fn the_builders_conversation_travels_with_the_project() {
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        engine_places: None,
         assets: false,
         usage: None,
         self_check: None,
@@ -4610,6 +4846,7 @@ fn waiting_for_another_analysis(d: &Path, limit_secs: u64) -> (Worker, std::sync
         feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
+        engine_places: None,
         assets: false,
         usage: None,
         self_check: None,
@@ -4691,6 +4928,7 @@ fn a_later_run_opens_the_projects_program_again_for_the_builder() {
             feed: Arc::new(Mutex::new(feed::FeedLog::open(&ws))),
             keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
             kept_checks: Mutex::default(),
+            engine_places: None,
             assets: false,
             usage: None,
             self_check: None,

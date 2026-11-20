@@ -1503,3 +1503,8 @@ Choose a model	Chọn mô hình
 
 # Saved-builder notice: English until native-speaker review.
 The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.	The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.
+Capture a screen state	Chụp một trạng thái màn hình
+Crashes of an app	Các sự cố của một ứng dụng
+Press keys	Nhấn phím
+Read the screen's controls	Đọc các điều khiển trên màn hình
+Type text	Nhập văn bản

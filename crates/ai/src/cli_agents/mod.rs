@@ -56,6 +56,7 @@ pub const KNOWN: &[(&str, &str, &str)] = &[
     ("aider", "aider", "Aider"),
     ("dsh", "dsh", "DeepSeek Harness"),
     ("devin", "devin", "Devin"),
+    ("zcode", "zcode", "ZCode"),
 ];
 
 pub fn program_for(agent: &str) -> String {
@@ -186,8 +187,13 @@ fn macos_codex_in(roots: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
 }
 
 /// Agents whose Windows desktop app keeps the command-line program in its own folder, under
-/// another name and off the search path, relative to `%LOCALAPPDATA%` (#1060).
-const IN_DESKTOP_APP: &[(&str, &str)] = &[("opencode", r"Programs\ai.opencode.desktop\resources\opencode-cli.exe")];
+/// another name and off the search path, relative to `%LOCALAPPDATA%` (#1060), with a file it
+/// needs beside it to run headless, if any. ZCode's program is the app itself, which runs its
+/// `resources\glm\zcode.cjs` as Node (#1781); an app without that script has no headless mode.
+const IN_DESKTOP_APP: &[(&str, &str, Option<&str>)] = &[
+    ("opencode", r"Programs\ai.opencode.desktop\resources\opencode-cli.exe", None),
+    ("zcode", r"Programs\ZCode\ZCode.exe", Some(r"Programs\ZCode\resources\glm\zcode.cjs")),
+];
 
 fn local_app_data() -> Option<PathBuf> {
     cfg!(windows).then(|| std::env::var_os("LOCALAPPDATA")).flatten().map(PathBuf::from)
@@ -195,8 +201,9 @@ fn local_app_data() -> Option<PathBuf> {
 
 /// `program`'s command-line program inside its desktop app, if that's installed under `local_data`.
 fn desktop_cli(program: &str, local_data: Option<&Path>) -> Option<PathBuf> {
-    let (_, inside) = IN_DESKTOP_APP.iter().find(|(name, _)| *name == program)?;
-    Some(local_data?.join(inside)).filter(|cli| cli.is_file())
+    let (_, inside, needs) = IN_DESKTOP_APP.iter().find(|(name, _, _)| *name == program)?;
+    let local_data = local_data?;
+    Some(local_data.join(inside)).filter(|cli| cli.is_file() && needs.is_none_or(|n| local_data.join(n).is_file()))
 }
 
 fn find_program_in(program: &str, path: Option<std::ffi::OsString>) -> Option<PathBuf> {
@@ -420,13 +427,14 @@ fn access_for(builder: bool, deep: bool, question: bool) -> Access {
     }
 }
 
-/// Whether `program`'s help mentions every required flag (10 s limit, stdin closed); `None` when
-/// the help couldn't be read (the program is missing, or too slow).
-pub fn verify_flags(program: &str, help_args: &[&str], needed: &[&str]) -> Option<bool> {
+/// Whether the help of the program `proc` starts (as the adapter starts it, so a desktop app runs
+/// headless here too) mentions every required flag (10 s limit, stdin closed); `None` when the
+/// help couldn't be read (the program is missing, or too slow).
+pub fn verify_flags(proc: Process, help_args: &[&str], needed: &[&str]) -> Option<bool> {
     if needed.is_empty() {
         return Some(true);
     }
-    match Process::new(program).args(help_args).timeout(Duration::from_secs(10)).stdout_cap(256 * 1024).run() {
+    match proc.args(help_args).timeout(Duration::from_secs(10)).stdout_cap(256 * 1024).run() {
         Ok(out) => {
             let text = format!("{}{}", out.stdout_text(), out.stderr_text());
             if needed.iter().all(|f| text.contains(f)) {
@@ -1054,7 +1062,7 @@ fn run_cli(spec: &CliSpec, text: &str, retry: bool, tx: &Sender<AgentEvent>, sto
                 // a program updated in place is seen.
                 let mut v = verified.lock().unwrap_or_else(PoisonError::into_inner);
                 if *v != Some(true) {
-                    *v = verify_flags(&program, help, needed);
+                    *v = verify_flags(adapter.process(&program), help, needed);
                 }
                 *v
             }
@@ -1100,6 +1108,12 @@ fn run_cli(spec: &CliSpec, text: &str, retry: bool, tx: &Sender<AgentEvent>, sto
         (remote.is_none() && adapter.reads_message_file()).then(|| MessageFile::write(&std::env::temp_dir(), &format!("{preamble}{text}"))).flatten();
     let resume_arg = if adapter.resumes() { resume.as_deref() } else { None };
     let args = args_for(adapter.as_ref(), &spec.options, text, &preamble, &mcp, resume_arg, access, message_file.as_ref().map(|f| f.0.as_path()));
+    // A message the command line can't hold is refused here, with a fix, rather than by the
+    // system with "The filename or extension is too long" (#402).
+    if let Err(e) = adapter.check_argv(&program, &args) {
+        let _ = tx.send(AgentEvent::Error { message: e.message, remediation: e.remediation, log: None });
+        return nothing_done(&name);
+    }
     let shown = FailureContext::new(&program, &args, text, remote.as_deref(), spec);
     // A builder turn may take hours and sit silent for long stretches: Ghidra's first look at a big
     // game, an engine build, or the person answering a question. Claude Code's own limits are
@@ -1911,6 +1925,23 @@ mod tests {
         std::fs::write(&cli, b"").unwrap();
         assert_eq!(desktop_cli("opencode", Some(d.path())), Some(cli));
         assert_eq!(desktop_cli("codex", Some(d.path())), None, "only the agents listed");
+    }
+
+    /// #1781: ZCode's program is its desktop app, found only when its headless runtime is there.
+    #[test]
+    fn zcode_is_found_only_with_its_headless_runtime() {
+        let d = tempfile::tempdir().unwrap();
+        let (_, exe, needs) = IN_DESKTOP_APP.iter().find(|(id, _, _)| *id == "zcode").copied().unwrap();
+        assert_eq!(desktop_cli("zcode", Some(d.path())), None, "not installed");
+        let app = d.path().join(exe);
+        std::fs::create_dir_all(app.parent().unwrap()).unwrap();
+        std::fs::write(&app, b"").unwrap();
+        assert_eq!(desktop_cli("zcode", Some(d.path())), None, "an app without zcode.cjs has no headless mode");
+        let runtime = d.path().join(needs.unwrap());
+        std::fs::create_dir_all(runtime.parent().unwrap()).unwrap();
+        std::fs::write(&runtime, b"").unwrap();
+        assert_eq!(desktop_cli("zcode", Some(d.path())), Some(app));
+        assert_eq!(desktop_cli("zcode", None), None, "not Windows");
     }
 
     const UNFINISHED_CHILD_ENV: &str = "CRAFT_ANYTHING_TEST_UNFINISHED_CHILD";
@@ -3611,7 +3642,7 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
         reg.register(Arc::new(EchoAgent));
         assert_eq!(
             format!("{reg:?}"),
-            r#"["claude-code", "codex", "gemini-cli", "opencode", "antigravity", "hermes", "maki", "aider", "copilot", "grok", "dsh", "devin", "echo-agent"]"#
+            r#"["claude-code", "codex", "gemini-cli", "opencode", "antigravity", "hermes", "maki", "aider", "copilot", "grok", "dsh", "devin", "zcode", "echo-agent"]"#
         );
     }
 

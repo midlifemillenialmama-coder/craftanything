@@ -14,6 +14,7 @@ mod grok;
 mod hermes;
 mod maki;
 mod opencode;
+mod zcode;
 pub use aider::Aider;
 pub use antigravity::Antigravity;
 pub use copilot::Copilot;
@@ -23,6 +24,7 @@ pub use grok::Grok;
 pub use hermes::Hermes;
 pub use maki::Maki;
 pub use opencode::OpenCode;
+pub use zcode::ZCode;
 
 /// What a run's arguments are built from.
 pub struct ArgsCx<'a> {
@@ -210,9 +212,19 @@ pub trait AgentAdapter: Send + Sync {
     fn stdin_text(&self, _preamble: &str, prompt: &str) -> String {
         prompt.to_string()
     }
-    /// The process for a local run of `program` (an adapter may clean its environment).
+    /// The process for a local run of `program` (an adapter may clean its environment). Its help
+    /// probe and connection test start the program this way too.
     fn process(&self, program: &str) -> Process {
         Process::new(program)
+    }
+    /// The arguments a connection test runs the program with, printing its first line.
+    fn version_args(&self) -> &'static [&'static str] {
+        &["--version"]
+    }
+    /// Refuse a run whose arguments (after `program`) the command line can't hold, for an agent
+    /// that only takes its message in argv, before anything starts (#402).
+    fn check_argv(&self, _program: &str, _args: &[String]) -> Result<(), ToolError> {
+        Ok(())
     }
     /// Whether it still names an account it was signed in to, so a sign-in that doesn't work any
     /// more has expired (or was signed out) rather than never happened.
@@ -327,6 +339,7 @@ impl AgentAdapters {
                 Arc::new(Grok),
                 Arc::new(DeepSeekHarness),
                 Arc::new(Devin),
+                Arc::new(ZCode),
             ],
         }
     }

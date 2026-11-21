@@ -6,21 +6,35 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `labeled` so that adding `full-ci` to an open PR starts a run with Windows in it.
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# A newer push to a PR branch cancels its older run; every push to main runs to the end.
+# A newer push to a PR branch cancels its older run; every push to main runs to the end. Adding
+# any label but `full-ci` gets a group of its own, so it neither runs the gate nor cancels a run.
 concurrency:
-  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  group: ci-${{ github.event_name == 'pull_request' && (github.event.action != 'labeled' || github.event.label.name == 'full-ci') && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   gate:
+    if: github.event.action != 'labeled' || github.event.label.name == 'full-ci'
     # Tracks @main so suite-wide CI fixes reach every app without a PR in each repository.
     uses: storytold/craft-common-actions/.github/workflows/gate.yml@main
     with:
+      # Windows on main, manual runs and pull requests labelled `full-ci`, so the `cfg(windows)`
+      # tests (search paths, consoles, Job Objects) run somewhere. Not on every PR: a Windows
+      # build of the workspace is slow. No macOS: the org's macOS runners are kept for releases.
+      os: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && '["ubuntu-24.04","windows-latest"]' || '["ubuntu-24.04"]' }}
+      # Windows checks what differs by platform: clippy (cfg(windows) code) and the tests. Two of
+      # crates/ai's tests start the CLI, so it is built first.
+      windows-command: |
+        cargo clippy --workspace --all-targets --locked -- -D warnings
+        cargo build -p craft-anything-cli --locked
+        cargo test --workspace --locked --no-fail-fast
       # Same craft-fonts commit as release.yml.
       craft-fonts-ref: b076417b5880bd4154bd22f00695b1d28c6bea83
       packages: >-

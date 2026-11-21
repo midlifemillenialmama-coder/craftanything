@@ -1476,8 +1476,9 @@ Owner: open · Status: in progress
 - [x] Windows: setup and doctor take the user profile (USERPROFILE) for home, as the apps do,
       not HOME, which MSYS2 and Cygwin shells point at their own folder.
       — claimed: Plastic-time, branch bugfix/r2.2-windows-home-is-the-user-profile
-- [ ] CI runs the tests on Ubuntu only, so `cfg(windows)` tests (search paths, consoles, Job
-      Objects) are checked only on contributors' machines: run them on a Windows runner too
+- [x] CI runs the tests on Ubuntu only, so `cfg(windows)` tests (search paths, consoles, Job
+      Objects) are checked only on contributors' machines: the gate now has a Windows leg (clippy and
+      `cargo test --workspace`) on main, manual runs and PRs labelled `full-ci`, not on every PR
 - [ ] "Claude Code on <ssh host>" is offered for any SSH host, whether or not it has Claude Code
       (#62)
 - [ ] Gemini CLI's sign-in reportedly refuses individuals now (#400): check, and stop recommending

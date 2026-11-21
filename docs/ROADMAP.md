@@ -1987,6 +1987,9 @@ Gaps found while using the app for real projects.
       switcher in every README (#831)
 - [x] A Thai README (`README.th.md`) translated from `README.md` and linked from the language
       switcher in every README
+- [x] An Italian README (`README.it.md`) translated from `README.md`, with English technical
+      terminology and links from every README language switcher (#2173)
+      — claimed: arloo, branch docs/italian-translation
 - [ ] Vietnamese letters with stacked marks (ạ ả ấ ế ơ ư ữ…) aren't in the bundled Figtree or egui's
       default fonts: without craft-fonts they show as boxes, and with it each such letter comes from
       Noto Sans CJK while the rest of the word is Figtree. Bundle a build of the text font that has the

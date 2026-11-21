@@ -2,14 +2,45 @@
 //! of after its whole turn. The run writes each one to `inbox/notes/<id>.json`; a coding agent
 //! that runs a command after every tool call (Claude Code's PostToolUse hook, running
 //! `craft-anything-cli builder-notes <dir>`) claims what's there by renaming it to
-//! `<id>.read.json` and gives the text to the model; the run sees the rename and shows the note as
-//! read. The rename is the one moment a note changes hands, so "take back" works until then.
+//! `<id>.read.json` and gives the text to the model. That is the one moment a note changes hands,
+//! so "take back" works until then. The run records the request's state before renaming that file
+//! to `<id>.recorded.json` and forgetting it; a claimed version-1 note is still recoverable until
+//! that recording completes. A restart may hand it over again, so this is at-least-once recovery.
 //! Notes nobody claimed still go in after the turn, as before. A note's file also keeps the
 //! person's own words ([`Left`]), so a note still waiting when the app closes isn't lost: the
 //! next run takes it as its own waiting note ([`take_left`]).
 
+use craft_anything_engine::versioned;
+use craft_anything_evidence::ToolError;
+use craft_anything_platform::sync::Mutex;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+
+const VERSION: u32 = 1;
+const STEPS: &[versioned::Step<Value>] = &[v0_to_v1];
+const _: () = assert!(STEPS.len() == VERSION as usize);
+
+fn v0_to_v1(value: &mut Value) -> Result<(), String> {
+    if value.is_object() { Ok(()) } else { Err("the note isn't an object".into()) }
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct NoteFile {
+    version: u32,
+    id: u64,
+    text: String,
+    left: Option<Left>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum State {
+    Waiting,
+    Read,
+    Recorded,
+}
 
 /// Where a project's notes wait for the builder.
 pub fn notes_dir(inbox: &Path) -> PathBuf {
@@ -24,10 +55,14 @@ fn read(dir: &Path, id: u64) -> PathBuf {
     dir.join(format!("{id}.read.json"))
 }
 
+fn recorded(dir: &Path, id: u64) -> PathBuf {
+    dir.join(format!("{id}.recorded.json"))
+}
+
 /// A note as the person sent it: what a later run sends if this one ends before handing it over.
 /// `text` is without the Just-ask answers the hand-over text may add, so a run in the other mode
 /// adds only the ones it may show.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Left {
     pub text: String,
     pub shown: String,
@@ -35,59 +70,223 @@ pub struct Left {
     pub pictures: Vec<PathBuf>,
 }
 
+/// A recoverable record and the exact bytes inspected before taking it over. This is only
+/// an in-memory handoff; the files remain version 1 and keep their original note id.
+#[derive(Debug)]
+pub(super) struct LeftNote {
+    pub id: u64,
+    pub left: Left,
+    waiting: Option<Vec<u8>>,
+    read: Option<Vec<u8>>,
+}
+
+struct Ids {
+    next: u64,
+}
+
+impl Ids {
+    fn reserve(&mut self, used: &BTreeSet<u64>) -> Result<(), ToolError> {
+        if let Some(last) = used.last() {
+            self.next = self.next.max(last.checked_add(1).ok_or_else(|| ToolError::invalid("The waiting note ids have no space for a later note."))?);
+        }
+        Ok(())
+    }
+
+    fn allocate(&mut self) -> Result<u64, ToolError> {
+        let id = self.next;
+        self.next = id.checked_add(1).ok_or_else(|| ToolError::invalid("The waiting note ids have no space for a later note."))?;
+        Ok(id)
+    }
+}
+
+static IDS: Mutex<Ids> = Mutex::new(Ids { next: 1 });
+
+fn named_id(name: &str) -> Option<(u64, State)> {
+    let name = name.strip_suffix(".json")?;
+    let (number, state) = if let Some(number) = name.strip_suffix(".read") {
+        (number, State::Read)
+    } else if let Some(number) = name.strip_suffix(".recorded") {
+        (number, State::Recorded)
+    } else {
+        (name, State::Waiting)
+    };
+    number.parse().ok().map(|id| (id, state))
+}
+
+/// Unknown files also reserve their names. A process that starts its counter again cannot
+/// overwrite a waiting, claimed, completed, or newer-format record.
+fn occupied_ids(dir: &Path) -> Result<BTreeSet<u64>, ToolError> {
+    let entries = match std::fs::read_dir(dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        result => result.map_err(|error| ToolError::io(dir.display(), error))?,
+    };
+    let mut ids = BTreeSet::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| ToolError::io(dir.display(), error))?;
+        if let Some((id, _)) = entry.file_name().to_str().and_then(named_id) {
+            ids.insert(id);
+        }
+    }
+    Ok(ids)
+}
+
+pub(super) fn reserve_ids(dir: &Path) -> Result<(), ToolError> {
+    let used = occupied_ids(dir)?;
+    IDS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).reserve(&used)
+}
+
+pub(super) fn new_id() -> Result<u64, ToolError> {
+    IDS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).allocate()
+}
+
+fn sync_directory(dir: &Path) -> Result<(), ToolError> {
+    #[cfg(unix)]
+    std::fs::File::open(dir).and_then(|file| file.sync_all()).map_err(|error| ToolError::io(dir.display(), error))?;
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
+}
+
 /// Leave a note for the builder's next step: `text` is what the agent's hook hands over.
 pub fn hand_over(dir: &Path, id: u64, text: &str, left: Option<&Left>) -> Result<(), craft_anything_evidence::ToolError> {
     std::fs::create_dir_all(dir).map_err(|e| craft_anything_evidence::ToolError::io(dir.display(), e))?;
-    let bytes = serde_json::to_vec(&serde_json::json!({"id": id, "text": text, "left": left}))
+    if let Some(parent) = dir.parent() {
+        sync_directory(parent)?;
+    }
+    let bytes = serde_json::to_vec(&NoteFile { version: VERSION, id, text: text.into(), left: left.cloned() })
         .map_err(|e| craft_anything_evidence::ToolError::internal(e.to_string()))?;
-    craft_anything_engine::project::write_atomic(&pending(dir, id), &bytes)
+    craft_anything_engine::project::write_atomic(&pending(dir, id), &bytes)?;
+    sync_directory(dir)
 }
 
 /// The notes an earlier run left waiting (the app closed before the builder took them, #1620),
 /// oldest first. A file without the person's words (from before they were kept) can't be sent
-/// safely and is left out, as is one that isn't a note; read notes were handed over already. A
-/// folder or file that can't be read is an error, not "no notes".
-fn left(dir: &Path) -> std::io::Result<Vec<Left>> {
+/// safely and is left out, as is one that isn't a note. A version-1 read note still needs its
+/// request state recorded; a legacy read note has no such evidence and stays excluded. A
+/// folder or file that can't be read, or a newer format, is an error, not "no notes".
+fn left(dir: &Path) -> std::io::Result<Vec<LeftNote>> {
     let entries = match std::fs::read_dir(dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         r => r?,
     };
-    let mut ids = Vec::new();
+    let mut files = Vec::new();
     for entry in entries {
-        if let Some(id) = entry?.file_name().to_str().and_then(|n| n.strip_suffix(".json")).and_then(|n| n.parse::<u64>().ok()) {
-            ids.push(id);
+        let entry = entry?;
+        if let Some((id, state)) = entry.file_name().to_str().and_then(named_id) {
+            files.push((id, entry.path(), state));
         }
     }
-    ids.sort_unstable();
-    let mut notes = Vec::new();
-    for id in ids {
-        let bytes = std::fs::read(pending(dir, id))?;
-        let note = serde_json::from_slice::<serde_json::Value>(&bytes).ok().and_then(|file| serde_json::from_value::<Left>(file.get("left")?.clone()).ok());
-        notes.extend(note.filter(|l| !l.text.trim().is_empty()));
+    files.sort_unstable_by_key(|(id, _, _)| *id);
+    let mut notes: BTreeMap<u64, LeftNote> = BTreeMap::new();
+    let mut completed = BTreeSet::new();
+    for (id, path, state) in files {
+        if !std::fs::symlink_metadata(&path)?.file_type().is_file() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "the note isn't a regular file"));
+        }
+        let bytes = std::fs::read(path)?;
+        let Some((found, file)) = decode(&bytes)? else {
+            if state != State::Waiting {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "the claimed or completed note isn't a recognized record"));
+            }
+            continue;
+        };
+        if state != State::Waiting && file.id != id {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "the claimed or completed note's identity doesn't match its name"));
+        }
+        if state == State::Recorded {
+            completed.insert(id);
+        }
+        if file.id == id
+            && (state == State::Waiting || (state == State::Read && found == VERSION))
+            && let Some(left) = file.left.filter(|left| !left.text.trim().is_empty())
+        {
+            let note = notes.entry(id).or_insert_with(|| LeftNote { id, left: left.clone(), waiting: None, read: None });
+            if note.left != left {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "the waiting and claimed records disagree about the note"));
+            }
+            if state == State::Waiting { note.waiting = Some(bytes) } else { note.read = Some(bytes) }
+        }
     }
-    Ok(notes)
+    if notes.keys().any(|id| completed.contains(id)) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "a completed note also has a waiting or claimed record"));
+    }
+    Ok(notes.into_values().collect())
 }
 
-/// Start a run's notes: an empty folder, and the notes an earlier run left waiting, for this run
-/// to wait with until the builder takes them (`wanted` is false for a run that brings its own
-/// message, which already carries them). Ids restart with the process, so the old files can't
-/// stay. When they can't be read, the folder is moved aside, not deleted.
-pub fn take_left(dir: &Path, wanted: bool) -> Vec<Left> {
-    match left(dir) {
-        Ok(notes) => {
-            clear(dir);
-            if wanted { notes } else { Vec::new() }
+fn decode(bytes: &[u8]) -> std::io::Result<Option<(u32, NoteFile)>> {
+    let Ok(mut value) = serde_json::from_slice::<Value>(bytes) else { return Ok(None) };
+    let found = match value.get("version") {
+        None => 0,
+        Some(version) => version
+            .as_u64()
+            .and_then(|version| u32::try_from(version).ok())
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "the waiting note's version isn't a whole number"))?,
+    };
+    if found > VERSION {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "the waiting note was saved by a newer Craft Anything"));
+    }
+    versioned::upgrade(&mut value, found, 0, STEPS).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if let Some(value) = value.as_object_mut() {
+        value.insert("version".into(), Value::from(VERSION));
+    }
+    Ok(serde_json::from_value(value).ok().map(|file| (found, file)))
+}
+
+/// Inspect the whole batch before changing any record. A failed or interrupted startup keeps
+/// the original files; unreadable or newer records stop startup and remain for inspection.
+pub(super) fn take_left(dir: &Path) -> Result<Vec<LeftNote>, ToolError> {
+    reserve_ids(dir)?;
+    left(dir).map_err(|error| {
+        ToolError::io(dir.display(), error)
+            .with_remediation("The waiting notes were kept. Restore access or inspect their records before starting the build again.")
+    })
+}
+
+fn unchanged(path: &Path, expected: Option<&[u8]>) -> Result<(), ToolError> {
+    let matches = match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => expected.is_none(),
+        Err(error) => return Err(ToolError::io(path.display(), error)),
+        Ok(metadata) if metadata.file_type().is_file() => expected.is_some_and(|expected| std::fs::read(path).is_ok_and(|bytes| bytes == expected)),
+        Ok(_) => false,
+    };
+    if matches { Ok(()) } else { Err(ToolError::invalid("A waiting note changed during recovery; its records were kept.")) }
+}
+
+/// Reuse the persistent id. A claimed note becomes waiting only after its new current-mode
+/// copy is synced. Explicitly carried notes stay claimed until their initial turn succeeds.
+pub(super) fn restore(dir: &Path, note: &LeftNote, text: &str, carried: bool) -> Result<(), ToolError> {
+    restore_using(dir, note, text, carried, || Ok(()))
+}
+
+fn restore_using(dir: &Path, note: &LeftNote, text: &str, carried: bool, after_publish: impl FnOnce() -> Result<(), ToolError>) -> Result<(), ToolError> {
+    let waiting = pending(dir, note.id);
+    let claimed = read(dir, note.id);
+    unchanged(&waiting, note.waiting.as_deref())?;
+    unchanged(&claimed, note.read.as_deref())?;
+    if carried {
+        if note.read.is_none() {
+            // A legacy waiting note can be recovered, but a legacy read note cannot. Write
+            // the current version durably before publishing its claimed successor.
+            hand_over(dir, note.id, text, Some(&note.left))?;
+            std::fs::hard_link(&waiting, &claimed).map_err(|error| ToolError::io(claimed.display(), error))?;
+            sync_directory(dir)?;
+            std::fs::remove_file(&waiting).map_err(|error| ToolError::io(waiting.display(), error))?;
+            sync_directory(dir)?;
+        } else if note.waiting.is_some() {
+            sync_directory(dir)?;
+            std::fs::remove_file(&waiting).map_err(|error| ToolError::io(waiting.display(), error))?;
+            sync_directory(dir)?;
         }
-        Err(e) => {
-            let aside = dir
-                .with_file_name(format!("notes-unread-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()));
-            match std::fs::rename(dir, &aside) {
-                Ok(()) => log::warn!("Couldn't read the notes waiting in {} ({e}); they're kept in {}", dir.display(), aside.display()),
-                Err(moved) => log::warn!("Couldn't read the notes waiting in {} ({e}), or move them aside ({moved})", dir.display()),
-            }
-            Vec::new()
+    } else {
+        hand_over(dir, note.id, text, Some(&note.left))?;
+        after_publish()?;
+        if note.read.is_some() {
+            unchanged(&claimed, note.read.as_deref())?;
+            std::fs::remove_file(&claimed).map_err(|error| ToolError::io(claimed.display(), error))?;
+            sync_directory(dir)?;
         }
     }
+    Ok(())
 }
 
 /// Take a note back before the builder read it: true when it was still waiting.
@@ -97,13 +296,49 @@ pub fn take_back(dir: &Path, id: u64) -> bool {
 
 /// The builder has read the note (it was claimed).
 pub fn was_read(dir: &Path, id: u64) -> bool {
-    read(dir, id).is_file()
+    read(dir, id).is_file() || recorded(dir, id).is_file()
+}
+
+/// The target's request state is saved. Keep that distinction even if removing the completed
+/// note fails; restart must not replay successfully recorded claimed notes. No directory is
+/// created here, and an error leaves the claimed file available for another attempt.
+pub(super) fn mark_recorded(dir: &Path, id: u64) -> Result<(), ToolError> {
+    let source = read(dir, id);
+    let destination = recorded(dir, id);
+    if !check_record(&source, id)? {
+        // A partial batch may already have acknowledged this note. Validate that evidence
+        // before allowing forget() to remove it; an unread note has neither entry.
+        check_record(&destination, id)?;
+        return Ok(());
+    }
+    match std::fs::symlink_metadata(&destination) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ToolError::io(destination.display(), error)),
+        Ok(_) => return Err(ToolError::invalid("The completed note's name is already occupied; both entries were kept for inspection.")),
+    }
+    std::fs::rename(&source, &destination).map_err(|error| ToolError::io(source.display(), error))
+}
+
+fn check_record(path: &Path, id: u64) -> Result<bool, ToolError> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(ToolError::io(path.display(), error)),
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err(ToolError::invalid("The note is not a regular file; it was kept for inspection.")),
+    }
+    let bytes = std::fs::read(path).map_err(|error| ToolError::io(path.display(), error))?;
+    let decoded = decode(&bytes).map_err(|error| ToolError::io(path.display(), error))?;
+    if decoded.is_none_or(|(_, file)| file.id != id) {
+        return Err(ToolError::invalid("The note's record changed; it was kept for inspection."));
+    }
+    Ok(true)
 }
 
 /// Done with a note: its files go.
 pub fn forget(dir: &Path, id: u64) {
     let _ = std::fs::remove_file(pending(dir, id));
     let _ = std::fs::remove_file(read(dir, id));
+    let _ = std::fs::remove_file(recorded(dir, id));
 }
 
 /// Start a run with no notes left over from an earlier one (ids restart with the process).
@@ -120,9 +355,12 @@ pub fn claim(dir: &Path) -> Vec<String> {
     ids.sort_unstable();
     ids.into_iter()
         .filter_map(|id| {
-            let text = std::fs::read(pending(dir, id)).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())?;
+            let (_, file) = std::fs::read(pending(dir, id)).ok().and_then(|bytes| decode(&bytes).ok().flatten())?;
+            if file.id != id {
+                return None;
+            }
             std::fs::rename(pending(dir, id), read(dir, id)).ok()?;
-            text.get("text").and_then(serde_json::Value::as_str).map(String::from)
+            Some(file.text)
         })
         .collect()
 }
@@ -150,6 +388,10 @@ pub fn hook_output(texts: &[String]) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn left_words(dir: &Path) -> std::io::Result<Vec<Left>> {
+        left(dir).map(|notes| notes.into_iter().map(|note| note.left).collect())
+    }
+
     #[test]
     fn a_note_changes_hands_once_and_can_be_taken_back_until_then() {
         let d = tempfile::tempdir().unwrap();
@@ -173,39 +415,212 @@ mod tests {
     fn notes_nobody_took_are_left_for_the_next_run() {
         let d = tempfile::tempdir().unwrap();
         let dir = notes_dir(d.path());
-        assert!(left(&dir).unwrap().is_empty(), "no folder, nothing left");
+        assert!(left_words(&dir).unwrap().is_empty(), "no folder, nothing left");
         let note = |text: &str| Left { text: text.into(), shown: format!("{text} (shown)"), pictures: vec![PathBuf::from("pictures/a.png")] };
         hand_over(&dir, 10, "add a form, with what was asked in Just ask", Some(&note("add a form"))).unwrap();
         hand_over(&dir, 2, "make it blue", Some(&note("make it blue"))).unwrap();
-        hand_over(&dir, 3, "taken by the hook", Some(&note("taken by the hook"))).unwrap();
+        // A legacy read record has no proof that request-state recording remained pending.
+        std::fs::write(
+            dir.join("3.json"),
+            br#"{"id":3,"text":"taken by the hook","left":{"text":"taken by the hook","shown":"taken by the hook (shown)","pictures":[]}}"#,
+        )
+        .unwrap();
         hand_over(&dir, 4, "from an older version", None).unwrap();
         hand_over(&dir, 5, " ", Some(&note(" "))).unwrap();
         std::fs::write(dir.join("6.json"), b"{not json").unwrap();
         std::fs::rename(dir.join("3.json"), dir.join("3.read.json")).unwrap();
-        assert_eq!(left(&dir).unwrap(), [note("make it blue"), note("add a form")], "oldest first, the person's words without the answers");
+        assert_eq!(left_words(&dir).unwrap(), [note("make it blue"), note("add a form")], "oldest first, the person's words without the answers");
         assert_eq!(claim(&dir)[0], "make it blue", "the hook still reads the hand-over text");
     }
 
     #[test]
-    fn a_run_takes_the_left_notes_and_starts_with_an_empty_folder() {
+    fn a_run_inspects_left_notes_without_erasing_their_durable_records() {
         let d = tempfile::tempdir().unwrap();
         let dir = notes_dir(d.path());
         let note = Left { text: "make it blue".into(), shown: "make it blue".into(), pictures: Vec::new() };
-        assert!(take_left(&dir, true).is_empty(), "no folder, nothing left");
+        assert!(take_left(&dir).unwrap().is_empty());
         hand_over(&dir, 1, "make it blue", Some(&note)).unwrap();
-        assert!(take_left(&dir, false).is_empty() && !dir.exists(), "a run with its own message clears them");
-        hand_over(&dir, 1, "make it blue", Some(&note)).unwrap();
-        assert_eq!(take_left(&dir, true), std::slice::from_ref(&note));
-        assert!(!dir.exists(), "their old ids can't clash with this run's");
+        let original = std::fs::read(pending(&dir, 1)).unwrap();
+        let recovered = take_left(&dir).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].id, 1);
+        assert_eq!(recovered[0].left, note);
+        assert_eq!(std::fs::read(pending(&dir, 1)).unwrap(), original, "inspection is not acknowledgement");
+        drop(recovered);
+        assert_eq!(take_left(&dir).unwrap().len(), 1, "another process can still recover the same note");
 
-        // One that can't be read: nothing is deleted, the folder is kept aside.
-        hand_over(&dir, 1, "make it blue", Some(&note)).unwrap();
         std::fs::create_dir_all(dir.join("2.json")).unwrap();
-        assert!(left(&dir).is_err());
-        assert!(take_left(&dir, true).is_empty() && !dir.exists());
-        let aside: Vec<_> = std::fs::read_dir(d.path()).unwrap().flatten().map(|e| e.path()).collect();
-        assert_eq!(aside.len(), 1, "{aside:?}");
-        assert!(aside[0].file_name().unwrap().to_string_lossy().starts_with("notes-unread-") && aside[0].join("1.json").is_file());
+        assert!(left_words(&dir).is_err());
+        assert!(take_left(&dir).is_err());
+        assert_eq!(std::fs::read(pending(&dir, 1)).unwrap(), original);
+        assert!(dir.join("2.json").is_dir(), "an unreadable batch stays intact for inspection");
+    }
+
+    #[test]
+    fn an_interrupted_takeover_keeps_both_copies_and_restarts_with_the_same_id() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = notes_dir(d.path());
+        let raw = Left { text: "Keep the title blue".into(), shown: "Keep the title blue".into(), pictures: Vec::new() };
+        hand_over(&dir, 71, "Old mode context and the blue title", Some(&raw)).unwrap();
+        assert_eq!(claim(&dir), ["Old mode context and the blue title"]);
+        let original = std::fs::read(read(&dir, 71)).unwrap();
+        let batch = take_left(&dir).unwrap();
+        let error =
+            restore_using(&dir, &batch[0], "Only current mode context", false, || Err(ToolError::invalid("Stop after the new copy is durable."))).unwrap_err();
+        assert!(error.message.contains("new copy is durable"));
+        assert_eq!(std::fs::read(read(&dir, 71)).unwrap(), original, "the old record is not discarded before the handoff completes");
+        assert!(pending(&dir, 71).is_file());
+        drop(batch);
+
+        let again = take_left(&dir).unwrap();
+        assert_eq!(again.len(), 1, "two durable copies describe one note, not two requests");
+        assert_eq!((again[0].id, &again[0].left), (71, &raw));
+        restore(&dir, &again[0], "New process current mode context", false).unwrap();
+        assert!(!was_read(&dir, 71), "the new worker cannot mistake an old claim for a fresh delivery");
+        assert_eq!(claim(&dir), ["New process current mode context"]);
+        assert!(claim(&dir).is_empty());
+    }
+
+    #[test]
+    fn carried_notes_stay_recoverable_without_being_claimed_twice() {
+        for legacy in [false, true] {
+            let d = tempfile::tempdir().unwrap();
+            let dir = notes_dir(d.path());
+            let raw = Left { text: "Keep the title blue".into(), shown: "Keep the title blue".into(), pictures: Vec::new() };
+            hand_over(&dir, 72, "Old mode context", Some(&raw)).unwrap();
+            if legacy {
+                let mut old: Value = serde_json::from_slice(&std::fs::read(pending(&dir, 72)).unwrap()).unwrap();
+                old.as_object_mut().unwrap().remove("version");
+                std::fs::write(pending(&dir, 72), serde_json::to_vec(&old).unwrap()).unwrap();
+            }
+            let batch = take_left(&dir).unwrap();
+            restore(&dir, &batch[0], "This note is in the initial message", true).unwrap();
+            assert!(claim(&dir).is_empty(), "the initial message already carries this id");
+            assert!(read(&dir, 72).is_file());
+            drop(batch);
+            let after_failed_start = take_left(&dir).unwrap();
+            assert_eq!(after_failed_start.len(), 1);
+            assert_eq!(after_failed_start[0].left, raw);
+            restore(&dir, &after_failed_start[0], &raw.text, false).unwrap();
+            assert_eq!(claim(&dir), [raw.text]);
+        }
+    }
+
+    #[test]
+    fn takeover_refuses_a_changed_or_newer_record_without_overwriting_it() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = notes_dir(d.path());
+        let raw = Left { text: "Keep the title blue".into(), shown: "Keep the title blue".into(), pictures: Vec::new() };
+        hand_over(&dir, 73, &raw.text, Some(&raw)).unwrap();
+        let batch = take_left(&dir).unwrap();
+        let future = br#"{"version":99,"id":73,"text":"Newer private record"}"#;
+        std::fs::write(pending(&dir, 73), future).unwrap();
+        assert!(restore(&dir, &batch[0], "Replacement context", false).is_err());
+        assert_eq!(std::fs::read(pending(&dir, 73)).unwrap(), future);
+        assert!(take_left(&dir).is_err());
+        assert_eq!(std::fs::read(pending(&dir, 73)).unwrap(), future);
+    }
+
+    #[test]
+    fn a_fresh_counter_reserves_unknown_waiting_claimed_and_completed_names() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = notes_dir(d.path());
+        std::fs::create_dir(&dir).unwrap();
+        for name in ["1.json", "2.read.json", "73.recorded.json"] {
+            std::fs::write(dir.join(name), b"Unknown contents must not be overwritten").unwrap();
+        }
+        let mut fresh = Ids { next: 1 };
+        fresh.reserve(&occupied_ids(&dir).unwrap()).unwrap();
+        assert_eq!(fresh.allocate().unwrap(), 74, "a new process keeps the order after every occupied state, even unrecognized bytes");
+        std::fs::write(dir.join("18446744073709551615.json"), b"Keep this extreme id").unwrap();
+        assert!(fresh.reserve(&occupied_ids(&dir).unwrap()).is_err());
+        fresh.next = u64::MAX;
+        assert!(fresh.allocate().is_err(), "id exhaustion cannot wrap into an earlier request");
+        for name in ["1.json", "2.read.json", "73.recorded.json"] {
+            assert_eq!(std::fs::read(dir.join(name)).unwrap(), b"Unknown contents must not be overwritten");
+        }
+        assert_eq!(std::fs::read(dir.join("18446744073709551615.json")).unwrap(), b"Keep this extreme id");
+    }
+
+    #[test]
+    fn claimed_notes_wait_for_recording_and_completed_notes_do_not_replay() {
+        let directory = tempfile::tempdir().unwrap();
+        let dir = notes_dir(directory.path());
+        let note = Left { text: "Translate into German".into(), shown: "Translate into German".into(), pictures: Vec::new() };
+        hand_over(&dir, 7, &note.text, Some(&note)).unwrap();
+        assert_eq!(claim(&dir), std::slice::from_ref(&note.text));
+        assert_eq!(left_words(&dir).unwrap(), std::slice::from_ref(&note), "handed to the builder is not yet saved request state");
+
+        mark_recorded(&dir, 7).unwrap();
+
+        assert!(!read(&dir, 7).exists());
+        assert!(recorded(&dir, 7).is_file());
+        assert!(was_read(&dir, 7), "an in-memory retry still knows that the builder took it");
+        assert!(left_words(&dir).unwrap().is_empty(), "keeping the completed file after cleanup failure cannot replay its request");
+        assert!(take_left(&dir).unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_recording_cleanup_preserves_all_notes_for_inspection() {
+        let directory = tempfile::tempdir().unwrap();
+        let dir = notes_dir(directory.path());
+        let note = Left { text: "Translate into German".into(), shown: "Translate into German".into(), pictures: Vec::new() };
+        for id in [1, 2] {
+            hand_over(&dir, id, &note.text, Some(&note)).unwrap();
+        }
+        assert_eq!(claim(&dir).len(), 2);
+        mark_recorded(&dir, 1).unwrap();
+        let original = std::fs::read(read(&dir, 2)).unwrap();
+        std::fs::create_dir(recorded(&dir, 2)).unwrap();
+        std::fs::write(recorded(&dir, 2).join("keep.txt"), b"Keep this unexpected entry").unwrap();
+
+        assert!(mark_recorded(&dir, 2).is_err());
+        assert_eq!(std::fs::read(read(&dir, 2)).unwrap(), original);
+        assert!(left_words(&dir).is_err(), "an unreadable completed entry prevents clearing the notes directory");
+        assert!(take_left(&dir).is_err());
+
+        let aside = dir.clone();
+        assert!(aside.is_dir(), "failed recovery preserves the records at their original paths");
+        assert!(recorded(&aside, 1).is_file());
+        assert_eq!(std::fs::read(read(&aside, 2)).unwrap(), original);
+        assert_eq!(std::fs::read(recorded(&aside, 2).join("keep.txt")).unwrap(), b"Keep this unexpected entry");
+    }
+
+    #[test]
+    fn newer_notes_are_not_claimed_or_cleared() {
+        let directory = tempfile::tempdir().unwrap();
+        let dir = notes_dir(directory.path());
+        std::fs::create_dir(&dir).unwrap();
+        let future = br#"{"version":99,"id":1,"text":"Keep this future note","left":{"text":"Keep this future note","shown":"Keep it","pictures":[]}}"#;
+        std::fs::write(pending(&dir, 1), future).unwrap();
+
+        assert!(claim(&dir).is_empty());
+        assert_eq!(std::fs::read(pending(&dir, 1)).unwrap(), future);
+        assert!(take_left(&dir).is_err());
+
+        let aside = dir.clone();
+        assert_eq!(std::fs::read(pending(&aside, 1)).unwrap(), future);
+    }
+
+    #[test]
+    fn a_claimed_note_with_changed_identity_is_preserved_on_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let dir = notes_dir(directory.path());
+        let note = Left { text: "Translate into German".into(), shown: "Translate into German".into(), pictures: Vec::new() };
+        hand_over(&dir, 71, &note.text, Some(&note)).unwrap();
+        assert_eq!(claim(&dir).len(), 1);
+        let mut changed: Value = serde_json::from_slice(&std::fs::read(read(&dir, 71)).unwrap()).unwrap();
+        changed["id"] = Value::from(72);
+        let changed = serde_json::to_vec(&changed).unwrap();
+        std::fs::write(read(&dir, 71), &changed).unwrap();
+
+        assert!(mark_recorded(&dir, 71).is_err());
+        assert!(left_words(&dir).is_err());
+        assert!(take_left(&dir).is_err());
+
+        let aside = dir.clone();
+        assert!(aside.is_dir(), "failed recovery preserves the records at their original paths");
+        assert_eq!(std::fs::read(read(&aside, 71)).unwrap(), changed);
     }
 
     #[test]

@@ -81,10 +81,11 @@ fn copy_tree(from: &Path, to: &Path, skip: &dyn Fn(&Path) -> bool, depth: usize)
 }
 
 /// The current `craft.json` format version. Bumping it means appending a step to [`MANIFEST_STEPS`].
-pub const MANIFEST_VERSION: u32 = 5;
+pub const MANIFEST_VERSION: u32 = 6;
 
 /// The steps that bring an older `craft.json` forward; step `i` goes from version `i` to `i + 1`.
-const MANIFEST_STEPS: &[versioned::Step<Value>] = &[manifest_v0_to_v1, manifest_v1_to_v2, manifest_v2_to_v3, manifest_v3_to_v4, manifest_v4_to_v5];
+const MANIFEST_STEPS: &[versioned::Step<Value>] =
+    &[manifest_v0_to_v1, manifest_v1_to_v2, manifest_v2_to_v3, manifest_v3_to_v4, manifest_v4_to_v5, manifest_v5_to_v6];
 const _: () = assert!(MANIFEST_STEPS.len() == MANIFEST_VERSION as usize, "one step per craft.json version");
 
 /// Version 0 (no `version` field) has the same shape as version 1; only the number is new.
@@ -127,6 +128,13 @@ fn manifest_v4_to_v5(doc: &mut Value) -> Result<(), String> {
         obj.insert("capture_deep".into(), Value::Bool(true));
     }
     Ok(())
+}
+
+/// Version 6 keeps the person's latest website-language request. Older builds opening this
+/// version are read-only, so they cannot drop it and revive the initial request's language.
+/// An older process that already opened version 5 must be closed before this version is saved.
+fn manifest_v5_to_v6(doc: &mut Value) -> Result<(), String> {
+    if doc.is_object() { Ok(()) } else { Err("the manifest isn't a JSON object".into()) }
 }
 
 /// Read a `craft.json` document of any version this build understands. A newer manifest is read
@@ -388,6 +396,15 @@ impl From<CheckRecord> for CheckResult {
     }
 }
 
+/// The latest explicit language instruction handed to a website's builder. `Original` is kept
+/// explicitly: clearing the field would revive a language named in the initial request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WebsiteLanguage {
+    Original,
+    Requested { tag: String },
+}
+
 /// A workspace's manifest (`craft.json`): what the person asked for, the target, status and history.
 /// Its schema is published in `docs/schemas/craft.schema.json` (`cargo xtask schemas`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -398,6 +415,10 @@ pub struct Manifest {
     pub name: String,
     /// What the person asked for, in their words.
     pub request: String,
+    /// The person's most recent explicit website-language request, after it reached the builder.
+    /// None predates this record or means no language was explicitly requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub website_language: Option<WebsiteLanguage>,
     pub target: TargetRef,
     /// The stack chosen for the build ("React + TypeScript (Vite)", "Rust + Bevy"…).
     #[serde(default)]
@@ -494,6 +515,7 @@ impl Manifest {
             version: MANIFEST_VERSION,
             name: name.trim().to_string(),
             request: request.trim().to_string(),
+            website_language: None,
             target,
             stack: String::new(),
             status: Status::New,
@@ -541,6 +563,7 @@ impl Manifest {
         self.questions = other.questions;
         self.approvals.clone_from(&other.approvals);
         self.name.clone_from(&other.name);
+        self.website_language.clone_from(&other.website_language);
     }
 }
 
@@ -799,6 +822,7 @@ impl Workspace {
         copy.save()?;
         let (budget, generate, builder, allowed, questions, approvals) =
             (m.asset_budget_usd, m.generate_assets, m.builder.clone(), m.allowed_actions.clone(), m.questions, m.approvals.clone());
+        let language = Workspace::open(&self.root)?.manifest.website_language;
         copy.set_person(|c| {
             c.asset_budget_usd = budget;
             c.generate_assets = generate;
@@ -806,6 +830,7 @@ impl Workspace {
             c.allowed_actions = allowed;
             c.questions = questions;
             c.approvals = approvals;
+            c.website_language = language;
         })?;
         Ok(copy)
     }
@@ -2157,6 +2182,22 @@ mod tests {
         ws.delete().unwrap();
         assert_eq!(std::fs::read_to_string(mine.join("index.html")).unwrap(), "<p>hi</p>");
         assert!(!mine.join(MANIFEST).exists() && !mine.join("inbox").exists() && !mine.join(AGENT_SESSION_FILE).exists());
+    }
+
+    #[test]
+    fn duplicating_a_website_keeps_its_latest_language_choice() {
+        for language in [None, Some(WebsiteLanguage::Requested { tag: "de".into() }), Some(WebsiteLanguage::Original)] {
+            let d = tempfile::tempdir().unwrap();
+            let mut ws = Workspace::create(d.path(), "Site", "Rebuild this website in French", TargetRef::None).unwrap();
+            ws.set_person(|m| m.website_language = Some(WebsiteLanguage::Requested { tag: "fr".into() })).unwrap();
+            let mut other = Workspace::open(&ws.root).unwrap();
+            other.set_person(|m| m.website_language = language.clone()).unwrap();
+            ws.save().unwrap();
+            assert_eq!(ws.manifest.website_language, Some(WebsiteLanguage::Requested { tag: "fr".into() }), "the copying handle is still stale");
+            let copy = ws.duplicate("Site copy").unwrap();
+            assert_eq!(copy.manifest.website_language, language);
+            assert_eq!(Workspace::open(&copy.root).unwrap().manifest.website_language, language, "the copy persists the current choice");
+        }
     }
 
     #[test]

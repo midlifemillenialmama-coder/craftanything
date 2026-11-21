@@ -1337,3 +1337,27 @@ exclusive-creation checks after selecting a name.
 then a fixed number of frames left the next action outside the settled layout. Wait for the
 background operation to finish and run immediate repaints after scrolling before clicking;
 otherwise a missed click looks like a backend mutation that never completed.
+
+**A builder claim was mistaken for completed request recording.** Handing a note to the builder
+does not prove its requested language reached the project record. Keep version-1 claimed notes
+recoverable until the request state is saved, then mark them recorded before cleanup. Restart
+recovery is at-least-once; legacy claimed notes lack that pending-state evidence. Preserve newer,
+damaged or identity-mismatched claimed/completed records for inspection. Record only a continuous
+read prefix in note-id order: a claim arriving between observations must not let an earlier
+language request overwrite a later one.
+
+**Restart cleared a note before its successor was durable.** Inspect the whole batch first,
+retain the persistent id, sync the new waiting copy before removing an older claimed record,
+and install every queued note before spawning the worker. Unreadable, changed or newer records
+stay in place and fail startup; a fresh process's counter must advance beyond occupied names,
+including names whose contents it cannot interpret. An interrupted takeover may leave both
+waiting and claimed copies: matching raw note identity is one recoverable request, while a
+disagreement must be preserved and reported. Explicitly carried initial-message notes stay
+claimed through startup and failed turns, rather than being offered to the hook twice.
+
+**A combined message erased request order and boundaries.** Only note ids actually joined by
+the caller are already carried. Prepend older recovered words before a genuinely new message,
+and pass the original shown requests separately to the policy recorder: a quoted observation
+must not prevent a later language request from being recognized. Once a hook has delivered a
+nonempty note, set the pending progress reset before any fallible request/completion recording;
+an after-turn note whose recording failed has not yet been sent and must not claim consumption.

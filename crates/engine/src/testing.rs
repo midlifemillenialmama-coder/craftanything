@@ -6,6 +6,22 @@ use crate::Session;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Replace external tool implementations with synthetic callbacks while retaining the real
+/// registry, authorization, cancellation, journal and inbox dispatch in workflow tests.
+pub fn engine_with_callbacks(session: Session, callbacks: &[(&str, crate::tool::ToolFn)]) -> crate::Engine {
+    let mut specs = crate::tools::all();
+    for spec in &mut specs {
+        if let Some((_, run)) = callbacks.iter().find(|(id, _)| *id == spec.id) {
+            spec.run = *run;
+        }
+    }
+    crate::Engine {
+        registry: crate::Registry::new(specs),
+        session: craft_anything_platform::sync::Mutex::new(session),
+        pending: craft_anything_platform::sync::Mutex::default(),
+    }
+}
+
 /// A fresh folder under the system temp folder, unique to this test process and call.
 pub fn temp_dir() -> PathBuf {
     static N: AtomicUsize = AtomicUsize::new(0);

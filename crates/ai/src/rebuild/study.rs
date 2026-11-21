@@ -2,6 +2,7 @@
 //! Ghidra's analysis in Deep mode) and write the notes the builder reads.
 
 use super::*;
+use craft_anything_engine::capture_review::StudyProfile;
 
 /// An Electron program is the Chromium and Node runtime, and analysing that takes hours: the app's
 /// own logic is the JavaScript in `resources/app.asar` beside it, which the study maps (#947).
@@ -33,7 +34,121 @@ pub(super) fn tools_run_remotely(over_ssh: bool, api_loop: bool) -> bool {
     over_ssh && !api_loop
 }
 
+/// Retain the files for inspection, but make a retry study again. Reload first so validation
+/// failure cannot overwrite concurrent edits to the project's target or other manifest fields.
+fn invalidate_capture(ws: &mut Workspace) -> Result<(), ToolError> {
+    *ws = Workspace::open(&ws.root)?;
+    ws.manifest.capture_deep = None;
+    ws.save()
+}
+
+/// Own only this attempt's private storage, outside capture/: incomplete routes must not be
+/// mistaken for study evidence. Existing routes are never cleanup targets.
+struct RouteCaptureStage {
+    dir: PathBuf,
+    cleaned: bool,
+}
+
+impl RouteCaptureStage {
+    fn new(ws: &Workspace) -> Result<Self, ToolError> {
+        let base = ws.investigation_dir();
+        let meta = std::fs::symlink_metadata(&base).map_err(|e| ToolError::io(base.display(), e))?;
+        if !meta.is_dir() || meta.file_type().is_symlink() || !craft_anything_engine::workspace::really_inside(&ws.root, &base) {
+            return Err(ToolError::new(ErrorCode::NoPermission, "Route capture storage must be a regular folder inside this project."));
+        }
+        let dir = craft_anything_engine::tools::artifact_tools::fresh_dir_in(&base, "route-capture")?;
+        Ok(Self { dir, cleaned: false })
+    }
+
+    fn close(mut self) -> Result<(), ToolError> {
+        std::fs::remove_dir_all(&self.dir).map_err(|e| {
+            ToolError::new(ErrorCode::CleanupFailed, format!("The temporary route capture could not be removed: {e}"))
+                .with_remediation("Check permissions in this project's investigation folder, then start a new study.")
+        })?;
+        self.cleaned = true;
+        Ok(())
+    }
+}
+
+impl Drop for RouteCaptureStage {
+    fn drop(&mut self) {
+        if !self.cleaned {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+}
+
+fn absent_route(capture: &Path, slug: &str) -> Result<PathBuf, ToolError> {
+    let unsafe_path = || ToolError::new(ErrorCode::NoPermission, "A route folder already exists or is not safe. Start a fresh study.");
+    if slug.is_empty() || !slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err(unsafe_path());
+    }
+    let routes = capture.join("routes");
+    for parent in [capture, routes.as_path()] {
+        let meta = std::fs::symlink_metadata(parent).map_err(|e| ToolError::io(parent.display(), e))?;
+        if !meta.is_dir() || meta.file_type().is_symlink() {
+            return Err(unsafe_path());
+        }
+    }
+    let dir = routes.join(slug);
+    match std::fs::symlink_metadata(&dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(dir),
+        Err(e) => Err(ToolError::io(dir.display(), e)),
+        Ok(_) => Err(unsafe_path()),
+    }
+}
+
 impl Worker {
+    /// One approval per run, bound to the exact capture and target. Auto mode and a project's
+    /// action preferences never authorize captured account data. A restart posts a new id.
+    pub(super) fn confirm_capture(&mut self, ws: &mut Workspace) -> Result<(), ToolError> {
+        use craft_anything_engine::{capture_review, tools::site_sign_in};
+        let engine = self.engine.clone();
+        let saved_for = |ws: &Workspace| {
+            let TargetRef::Website { url } = &ws.manifest.target else { return None };
+            let key = site_sign_in::site_key(url).ok()?;
+            site_sign_in::saved(&engine.session(), &key)
+        };
+        let saved = saved_for(ws);
+        let review = match capture_review::prepare(ws, saved.as_ref()) {
+            Ok(review) => review,
+            Err(error) => {
+                invalidate_capture(ws)?;
+                return Err(error);
+            }
+        };
+        let Some(review) = review else { return Ok(()) };
+        self.inbox.withdraw_capture_reviews()?;
+        self.step(ws, Step::Study, Status::NeedsYou, "Check the first screenshots before the builder uses this signed-in capture.")?;
+        let id = self.inbox.post_capture_review(review.clone())?;
+        self.relay_inbox();
+        let answer = self.inbox.wait(&id, Duration::from_secs(1800), &|| self.stop.is_cancelled() || !self.inbox.contains_request(&id));
+        self.stop.check()?;
+        if !answer.is_some_and(|a| a.allow == Some(true) && !a.always) {
+            // A rejected capture is studied again on the next run, rather than silently reused.
+            invalidate_capture(ws)?;
+            return Err(ToolError::new(ErrorCode::NoPermission, "The signed-in capture was not confirmed. The builder did not start.")
+                .with_remediation("Start a new study when you are ready to check the website and account again."));
+        }
+        // Read disk again: switching targets/accounts or replacing any captured content while
+        // the person looks at the screenshots cannot release different content to the builder.
+        let current = Workspace::open(&ws.root)?;
+        let saved = saved_for(&current);
+        let fresh = capture_review::prepare(&current, saved.as_ref());
+        *ws = current;
+        match fresh {
+            Ok(Some(current)) if current == review => {}
+            result => {
+                invalidate_capture(ws)?;
+                return Err(result.err().unwrap_or_else(|| {
+                    ToolError::new(ErrorCode::NoPermission, "The website, account or capture changed while confirmation was waiting.")
+                        .with_remediation("Start a new study and confirm its new screenshots. The builder did not start.")
+                }));
+            }
+        }
+        self.stop.check()
+    }
+
     /// A run after the first skips the study, so its session has nothing open and the builder's
     /// first `native_*` calls said "Nothing is open yet" (#1421). Open what the study looked at, so
     /// the builder's tool server gets it. A failure only says why: the builder can still open it.
@@ -71,7 +186,8 @@ impl Worker {
         match ws.manifest.target.clone() {
             TargetRef::Website { url } => {
                 self.step(ws, Step::Study, Status::Inspecting, &format!("Opening {url} in a private browser…"))?;
-                self.call("web_site_open", json!({"url": url}))?;
+                let opened = self.call("web_site_open", json!({"url": url}))?;
+                let (profile, _) = StudyProfile::opened(&url, &opened)?;
                 self.step(ws, Step::Study, Status::Inspecting, "Photographing the page and reading its layout…")?;
                 let capture = ws.capture_dir();
                 if capture.exists() {
@@ -80,6 +196,7 @@ impl Worker {
                 // The widths the check compares at, so every picture has its pair.
                 let widths = self.engine.session().settings.build.widths();
                 self.call("web_site_capture", json!({"output_directory": capture.display().to_string(), "widths": widths, "noise_pass": true}))?;
+                profile.check_captures(ws)?;
                 // Menus, pop-ups and tabs, one at a time, on a computer and on a phone (where a menu
                 // button often replaces the navigation); a page without them (or a failure) is fine.
                 self.step(ws, Step::Study, Status::Inspecting, "Opening its menus, pop-ups and tabs…")?;
@@ -88,12 +205,16 @@ impl Worker {
                 for (dir, width) in views {
                     let states = capture.join(dir);
                     if let Err(e) = self.call("web_page_states_capture", json!({"output_directory": states.display().to_string(), "width": width})) {
+                        if e.code == ErrorCode::Cancelled {
+                            return Err(e);
+                        }
                         self.step(ws, Step::Study, Status::Inspecting, &format!("Couldn't open its menus and pop-ups at {width} px: {}", e.message))?;
                     }
                 }
-                self.capture_routes(ws, &url, &widths)?;
+                self.capture_routes(ws, &url, &widths, &profile)?;
+                profile.check_captures(ws)?;
                 if deep {
-                    self.how_it_works(ws, &url)?;
+                    self.how_it_works(ws, &url, &profile)?;
                 }
             }
             TargetRef::Local { path } if !deep => self.study_from_outside(ws, &path)?,
@@ -183,6 +304,7 @@ impl Worker {
                 craft_anything_engine::project::write_atomic(&capture.join("README.md"), b"# No target\n\nBuild from the request alone.\n")?;
             }
         }
+        self.stop.check()?;
         ws.manifest.capture_deep = Some(deep);
         ws.save()?;
         Ok(())
@@ -191,19 +313,25 @@ impl Worker {
     /// Deep mode: how the site works, not only how it looks, into capture/how-it-works.md: what its
     /// JavaScript is made of (with readable sources where its maps allow) and ten seconds of what the
     /// start page does (requests, console, WebSocket messages). A part that fails is said, not fatal.
-    fn how_it_works(&mut self, ws: &mut Workspace, url: &str) -> Result<(), ToolError> {
+    fn how_it_works(&mut self, ws: &mut Workspace, url: &str, profile: &StudyProfile) -> Result<(), ToolError> {
         self.step(ws, Step::Study, Status::Inspecting, "Reading its JavaScript and watching what it does…")?;
         // The routes left the browser on another page; these look at the start page.
-        let _ = self.call("web_site_open", json!({"url": url}));
+        // Never inspect a leftover browser after a failed reopen, or a newly saved account.
+        let opened = self.call("web_site_open", profile.open_params(url))?;
+        let endpoint = profile.reopened(url, &opened)?;
+        self.stop.check()?;
         let mut notes = String::from("# How it works\n\nDeep mode: what the site's JavaScript is made of and what its start page did while we watched.\n");
         let looks = [
-            ("Its JavaScript", "web_page_js_analyze", json!({"load_source_maps": true})),
-            ("Ten seconds of it", "web_page_watch", json!({"watch_ms": 10_000, "with_websocket_outlines": true})),
+            ("Its JavaScript", "web_page_js_analyze", json!({"cdp_endpoint": endpoint, "load_source_maps": true})),
+            ("Ten seconds of it", "web_page_watch", json!({"cdp_endpoint": endpoint, "watch_ms": 10_000, "with_websocket_outlines": true})),
         ];
         for (title, tool, params) in looks {
             notes.push_str(&format!("\n## {title}\n\n"));
-            notes.push_str(&match self.call(tool, params) {
+            let result = self.call(tool, params);
+            self.stop.check()?;
+            notes.push_str(&match result {
                 Ok(out) => describe(&out),
+                Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
                 Err(e) => format!("{tool} didn't work: {}\n", e.message),
             });
         }
@@ -213,7 +341,13 @@ impl Worker {
         // everywhere else. Request bodies are kept too, so two operations sent to one endpoint (a
         // GraphQL POST, say) can be told apart when the stand-in answers them. A failure is said in
         // the notes, not fatal to the study.
-        match self.call("web_walkthrough_record", recording_params(url)) {
+        let mut params = recording_params(url);
+        if let Some(object) = params.as_object_mut() {
+            object.insert("cdp_endpoint".into(), json!(endpoint));
+        }
+        let result = self.call("web_walkthrough_record", params);
+        self.stop.check()?;
+        match result {
             Ok(ToolOutput::Evidence(evidence)) => {
                 let requests = evidence.result.pointer("/network/requests").and_then(Value::as_array).cloned().unwrap_or_default();
                 let file = ws.capture_dir().join(RECORDING);
@@ -226,12 +360,16 @@ impl Worker {
                 }
             }
             Ok(_) => notes.push_str(&format!("\n## A recording of its traffic\n\nNothing was recorded, so there's no recording in capture/{RECORDING}.\n")),
+            Err(e) if e.code == ErrorCode::Cancelled => return Err(e),
             Err(e) => notes.push_str(&format!(
                 "\n## A recording of its traffic\n\nRecording it didn't work ({}), so there's no recording in capture/{RECORDING}.\n",
                 e.message
             )),
         }
-        craft_anything_engine::project::write_atomic(&ws.capture_dir().join(HOW_IT_WORKS), notes.as_bytes())
+        self.stop.check()?;
+        craft_anything_engine::project::write_atomic(&ws.capture_dir().join(HOW_IT_WORKS), notes.as_bytes())?;
+        self.stop.check()?;
+        profile.record_deep(ws)
     }
 
     /// Clean room: nothing inside the original is read (no files, folder or code). When Settings
@@ -274,20 +412,20 @@ impl Worker {
 
     /// The site's other pages (up to `build.max_pages` same-site pages: links from the start
     /// page, then links from those pages while there's room), each captured into
-    /// capture/routes/<name>/ and listed in capture/routes.json. A page that can't be captured is
-    /// left out; it never stops the study.
-    fn capture_routes(&mut self, ws: &mut Workspace, start: &str, widths: &[u32]) -> Result<(), ToolError> {
+    /// capture/routes/<name>/ and listed in capture/routes.json. Capture failures are reported;
+    /// ordinary page-load failures are skipped; identity failures and cancellation stop it.
+    fn capture_routes(&mut self, ws: &mut Workspace, start: &str, widths: &[u32], profile: &StudyProfile) -> Result<(), ToolError> {
         let capture = ws.capture_dir();
         let read = |dir: &Path| std::fs::read(dir.join("capture.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
         let found = read(&capture).unwrap_or(Value::Null);
         let max = self.engine.session().settings.build.max_pages.min(kinds::website::MAX_ROUTES);
         let picked = kinds::website::pick_routes(&found, start, max);
-        let mut kept = self.capture_pages(ws, &picked, widths)?;
+        let mut kept = self.capture_pages(ws, &picked, widths, profile)?;
         // One level deeper: pages linked from the ones just captured, while there's room.
         if kept.len() < max && !kept.is_empty() {
             let captures: Vec<Value> = kept.iter().filter_map(|r| read(&capture.join("routes").join(&r.slug))).collect();
             let deeper = kinds::website::pick_deeper_routes(&captures, start, &kept, max - kept.len());
-            kept.extend(self.capture_pages(ws, &deeper, widths)?);
+            kept.extend(self.capture_pages(ws, &deeper, widths, profile)?);
         }
         if !kept.is_empty() {
             let json = serde_json::to_vec_pretty(&kept).map_err(|e| ToolError::internal(e.to_string()))?;
@@ -297,26 +435,68 @@ impl Worker {
     }
 
     /// Capture each page into capture/routes/<slug>/; returns the ones that worked.
-    fn capture_pages(&mut self, ws: &mut Workspace, picked: &[kinds::website::Route], widths: &[u32]) -> Result<Vec<kinds::website::Route>, ToolError> {
+    fn capture_pages(
+        &mut self,
+        ws: &mut Workspace,
+        picked: &[kinds::website::Route],
+        widths: &[u32],
+        profile: &StudyProfile,
+    ) -> Result<Vec<kinds::website::Route>, ToolError> {
         let capture = ws.capture_dir();
         let mut kept = Vec::new();
         if !picked.is_empty() {
             // web_site_capture creates its own folder, inside one that exists.
-            std::fs::create_dir_all(capture.join("routes")).map_err(|e| ToolError::io(capture.display(), e))?;
+            let routes = capture.join("routes");
+            match std::fs::create_dir(&routes) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(ToolError::io(routes.display(), e)),
+            }
         }
         for (i, r) in picked.iter().enumerate() {
             self.step(ws, Step::Study, Status::Inspecting, &format!("Photographing more pages ({} of {}): {}…", i + 1, picked.len(), r.path))?;
-            let dir = capture.join("routes").join(&r.slug);
-            let got = self.call("web_site_open", json!({"url": r.url})).and_then(|_| {
-                self.call(
-                    "web_site_capture",
-                    json!({"output_directory": dir.display().to_string(), "include_html": false, "widths": widths, "noise_pass": true}),
-                )
-            });
+            let dir = absent_route(&capture, &r.slug)?;
+            let opened = match self.call("web_site_open", profile.open_params(&r.url)) {
+                Ok(opened) => opened,
+                // Page.navigate's ordinary errorText is ProgramFailed. Other errors may
+                // indicate permission, profile, revision or cancellation failures: stop.
+                Err(e) if e.code == ErrorCode::ProgramFailed => {
+                    self.step(ws, Step::Study, Status::Inspecting, &format!("Couldn't open {}: {}", r.path, e.message))?;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            profile.reopened(&r.url, &opened)?;
+            let stage = RouteCaptureStage::new(ws)?;
+            let output = stage.dir.join("page");
+            let got = self.call(
+                "web_site_capture",
+                json!({"output_directory": output.display().to_string(), "include_html": false, "widths": widths, "noise_pass": true}),
+            );
+            self.stop.check()?;
+            if got.is_ok() {
+                // Recheck before publishing; never replace a previous or unexpected route.
+                absent_route(&capture, &r.slug)?;
+                std::fs::rename(&output, &dir).map_err(|e| ToolError::io(dir.display(), e))?;
+            }
+            stage.close()?;
             match got {
                 Ok(_) => kept.push(r.clone()),
-                // Said in the feed, not hidden: the page is left out and the study goes on.
-                Err(e) => self.step(ws, Step::Study, Status::Inspecting, &format!("Couldn't photograph {}: {}", r.path, e.message))?,
+                Err(e)
+                    if matches!(
+                        e.code,
+                        ErrorCode::ProgramFailed
+                            | ErrorCode::TimedOut
+                            | ErrorCode::GarbledOutput
+                            | ErrorCode::OverLimit
+                            | ErrorCode::NotFound
+                            | ErrorCode::FileError
+                            | ErrorCode::RecordingFailed
+                    ) =>
+                {
+                    self.step(ws, Step::Study, Status::Inspecting, &format!("Couldn't photograph {}: {}", r.path, e.message))?;
+                }
+                Err(e) => return Err(e),
             }
         }
         Ok(kept)

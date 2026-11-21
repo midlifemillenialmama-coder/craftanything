@@ -828,7 +828,8 @@ launch or preview was run for this documentation correction.
   game must also pass its own `--self-test` (the build plays its core loop with scripted input
   and reports whether the player moved, acted and the HUD was drawn), and a Deep-mode game that
   uses the original's files must have `app/CREDITS.md` and the private-use line in
-  `app/README.md`. The self-test is the build's own report: Craft Anything doesn't yet watch the
+  `app/README.md`; one that uses none says so in `app/CREDITS.md` instead, unless files
+  extracted from the game are in `app/Original/`. The self-test is the build's own report: Craft Anything doesn't yet watch the
   game play or measure the values itself.
 - In Deep mode, app and game targets get a static study (triage, engine detection, file
   inventory, JS app graph, Ghidra when installed); in Clean room only the person's pictures and

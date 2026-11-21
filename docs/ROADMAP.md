@@ -1692,8 +1692,16 @@ Gaps found while using the app for real projects.
       files, which take no arguments, aren't stopped by it. Checked by state tests of each case and
       a UI test that types a bad list, sees the message and a disabled Add, then fixes it
       — claimed: tanish2k09, branch bugfix/r2.9-plugin-args-bad-list
-- [ ] The plugin form doesn't check that a command exists or that the plugin answers before it's
-      saved; #2153 also asks for that (a found-program check, a test call)
+- [x] The plugin form didn't check that a command exists or that the plugin answers before it's
+      saved (#2153). `plugins_add` now refuses a command whose program isn't on this computer (on
+      the plugin's own PATH, the usual search path, or as a path, relative to its `cwd`), and the
+      form keeps what was typed until the plugin is added. Test beside Add (`plugins_test`, same
+      fields) starts the unsaved server, completes the handshake and lists its tools, saving and
+      caching nothing. Unit tests of the lookup and of a stand-in server over stdio (Unix), tool
+      tests, and a UI test of a refused Add and a failed Test
+      — PR #2217; claimed: rmsff, branch feature/r2.9-plugin-form-checks
+- [ ] A plugin's Test lists its tools but calls none, and #2153 met a server that listed 11 tools
+      and failed on use. Offer an optional call of one tool the person picks, saying it runs it
 - [x] Each project chooses, per kind of action, what the builder's approvals get (allow, ask or
       refuse): reading the web, commands, files outside the project, pushing and publishing,
       deleting outside the project, system changes, other tools. Unset kinds follow Auto mode as

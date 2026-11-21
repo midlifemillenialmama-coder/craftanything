@@ -99,6 +99,7 @@ pub const TOOLS: &[&str] = &[
     "plugins_list",
     "plugins_refresh",
     "plugins_add",
+    "plugins_test",
     "plugins_remove",
     "setup_plan",
     "setup_apply",

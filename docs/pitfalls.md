@@ -191,6 +191,11 @@ ours as soon as its listener was dropped. Another fixture could acquire it befor
 Use the unassigned loopback port zero to exercise a real connection refusal without borrowing
 and releasing a shared ephemeral port.
 
+**A click aimed where a control was.** A UI test cleared a message by changing the app's state and
+clicked Test at once; the message's going had moved the form, so the click landed where the button
+had been and nothing ran, which looked like a worker too slow for `wait`. After changing state
+that moves the layout, run a frame or two before clicking.
+
 **Fixtures that leak into each other.** A "nothing here" path sat beside a fake game folder in the
 same temp directory, and game detection walked up and found the game. Give each case its own
 `tempfile::tempdir()`.

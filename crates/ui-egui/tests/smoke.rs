@@ -2222,6 +2222,38 @@ fn a_plugins_bad_argument_list_is_refused_until_fixed() {
     assert_eq!(h.state().state.plugin_form.params(), Some(serde_json::json!({"id": "ls", "command": "server", "args": ["--stdio", "--port"]})));
 }
 
+/// #2153: a plugin whose program isn't there is refused with the form kept to fix it, and Test
+/// says so without adding anything. A .wasm file has no server to test.
+#[test]
+fn a_plugin_is_checked_and_tested_before_its_added() {
+    use egui_kittest::kittest::NodeT;
+    let mut h = harness(|| {
+        let mut a = demo::app(demo::engine(Mode::Beginner, true));
+        a.state.settings_open = true;
+        a
+    });
+    h.run_steps(3);
+    h.get_by_label("Plugins").click();
+    h.run_steps(3);
+    assert!(h.get_by_label("Test").accesskit_node().is_disabled(), "nothing to test yet");
+    h.state_mut().state.plugin_form.id = "docs".into();
+    h.state_mut().state.plugin_form.place = "craft-anything-no-such-plugin-server".into();
+    h.run_steps(2);
+    h.get_by_label("Add").click();
+    assert!(wait(&mut h, |a| a.state.toasts.iter().any(|(t, err)| *err && t.contains("isn't on this computer"))), "{:?}", h.state().state.toasts);
+    assert_eq!(h.state().state.plugin_form.place, "craft-anything-no-such-plugin-server", "kept to be fixed");
+    assert!(h.state().settings.plugins.mcp.is_empty());
+    h.state_mut().state.toasts.clear();
+    // The message's going moves the form; click where Test is now.
+    h.run_steps(2);
+    h.get_by_label("Test").click();
+    assert!(wait(&mut h, |a| a.state.toasts.iter().any(|(t, err)| *err && t.starts_with("The plugin's test failed."))), "{:?}", h.state().state.toasts);
+    assert!(h.state().settings.plugins.mcp.is_empty(), "a test adds nothing");
+    h.state_mut().state.plugin_form.place = "/plugins/words.wasm".into();
+    h.run_steps(2);
+    assert!(h.get_by_label("Test").accesskit_node().is_disabled(), "a .wasm file has no server to start");
+}
+
 #[test]
 fn a_website_check_lists_each_pages_likeness() {
     let mut h = harness(|| {

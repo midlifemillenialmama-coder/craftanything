@@ -1230,13 +1230,21 @@ fn plugins(app: &mut CraftApp, ui: &mut Ui) {
         );
     }
     ui.add_space(theme::space::SM);
-    let params = app.state.plugin_form.params();
-    if widgets::primary_icon(ui, Some("plus"), "Add", params.is_some()).clicked()
-        && let Some(params) = params
-    {
-        app.act("plugins_add", params, tr("Add a plugin"));
-        app.state.plugin_form = Default::default();
-    }
+    let (params, test) = (app.state.plugin_form.params(), app.state.plugin_form.test_params());
+    ui.horizontal(|ui| {
+        // The form is emptied once the plugin is added, so a refused one can be fixed (#2153).
+        if widgets::primary_icon(ui, Some("plus"), "Add", params.is_some()).clicked()
+            && let Some(params) = params
+        {
+            app.act("plugins_add", params, tr("Add a plugin"));
+        }
+        let tested = ui.add(widgets::Button::new(widgets::ButtonKind::Secondary, "Test").icon(Some("cable")).enabled(test.is_some()));
+        if tested.on_hover_text(tr("Starts it and reads its tools, without adding it.")).clicked()
+            && let Some(test) = test
+        {
+            app.act("plugins_test", test, tr("Test a plugin"));
+        }
+    });
     ui.label(RichText::new(tr("Plugins added here always ask before each call.")).color(t.text_faint).size(theme::CAPTION));
 }
 

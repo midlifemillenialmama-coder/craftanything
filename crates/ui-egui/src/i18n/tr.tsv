@@ -1474,6 +1474,13 @@ Connecting to {name}… {seconds} s	{name} sunucusuna bağlanılıyor… {second
 Stopped adding {name}.	{name} eklenmesi durduruldu.
 It isn't there any more, so {program} runs in its place.	Artık orada değil, bu yüzden yerine {program} çalışıyor.
 Use it	Bunu kullan
+Capture a screen state	Bir ekran durumunu yakala
+Crashes of an app	Bir uygulamanın çökmeleri
+Press keys	Tuşlara bas
+Read the screen's controls	Ekrandaki denetimleri oku
+Type text	Metin yaz
+Map an app's screens	Bir uygulamanın ekranlarını haritala
+Walk through an app's screens	Bir uygulamanın ekranlarında gezin
 
 # Native update checks and verified installation.
 ArtCraft Launcher manages this app's version. Change its version there.	Bu uygulamanın sürümünü ArtCraft Launcher yönetiyor. Sürümü oradan değiştirin.

@@ -1143,6 +1143,15 @@ Owner: open · Status: in progress
       are refused.
       See [Grok Build](grok.md).
       — branch `feature/r2.2-grok-agent`
+- [x] Kimi Code CLI as a coding agent over ACP (`kimi acp`, #1963): Detect finds `kimi`, the
+      person's own `kimi login` (a credential file under `~/.kimi-code/credentials/` counts as
+      signed in and isn't read; none is unknown), the model on `session/set_config_option`, our
+      MCP server in `session/new`. Its print mode (`kimi -p`) takes the message only in argv and
+      can't be handed our server, so it isn't used. Clean room, deep chat and questions are
+      refused. Scripted stand-in tests only. - branch `feature/1963-kimi-code-cli`
+- [ ] Kimi Code CLI: run a live deep build with a signed-in `kimi` and check that our server's
+      tools reach the session, which edits and commands send `session/request_permission`, the
+      model list `session/new` returns, and a saved session continuing with `session/load`.
 - [x] Review hardening: cap target handoff at 128 while preserving the active target; propagate
       context-discovery cancellation, normalize CLI-only efforts for Claude requests, and name
       the configured agent in shared picker warnings, with focused regressions and translations

@@ -2296,7 +2296,10 @@ Owner: open · Status: in progress
 - [x] Unreal: decode cooked half- and full-precision floating-point textures with the shared bounded pixel reader.
       — claimed: Afloat16, branch feature/r3.9-unreal-float-textures-20261109
       Source `75b507c0b96f`; [format checks](https://github.com/Afloat16/claude-mem/actions/runs/42634877637/job/129220281335) and [compatibility gates](https://github.com/Afloat16/claude-mem/actions/runs/42642583301/job/129247271153) passed.
-- [ ] Unreal: sounds and meshes out (so a Deep-mode rebuild needs no outside converter for them)
+- [x] Unreal: sounds out, as the WAV or Ogg file a cooked SoundWave stores (so a Deep-mode rebuild needs no outside converter for them)
+      — [#2238](https://github.com/storytold/craft-anything/pull/2238)
+- [ ] Unreal: meshes out (static meshes in a common format, so a Deep-mode rebuild needs no outside converter for them)
+- [ ] Unreal: sounds stored any other way (Bink Audio, streamed in parts, raw PCM without a WAV header) out
 
 - [x] Decode Unity EAC single-channel and dual-channel textures through the bounded picture exporter.
       — claimed: Afloat16, branch feature/r3.9-unity-eac-textures-20261111

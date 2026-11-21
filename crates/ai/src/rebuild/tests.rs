@@ -1219,7 +1219,12 @@ fn games_get_the_mechanics_sheet_and_decompile_only_in_deep_mode() {
     assert!(deep.contains("original game's own files") && deep.contains("Never decrypt") && deep.contains("must not be shared") && deep.contains("CREDITS.md"));
     assert!(deep.contains(PRIVATE_USE_NOTE), "the README line the credits check looks for, as written");
     // It points the builder at the app's own archive tools before any outside converter.
-    assert!(deep.contains("enable_toolset with \"formats\"") && deep.contains("game_pak_extract") && deep.contains("game_unreal_texture_export"));
+    assert!(
+        deep.contains("enable_toolset with \"formats\"")
+            && deep.contains("game_pak_extract")
+            && deep.contains("game_unreal_texture_export")
+            && deep.contains("game_unreal_sound_export")
+    );
     assert!(!clean.contains("game_pak_extract"), "Clean room copies no files out of the game");
     // Clean room copies none of the original's files: its own art, and it says Deep mode is needed.
     assert!(clean.contains("take nothing from the original game's files") && clean.contains("Make your own simple versions"), "{clean}");

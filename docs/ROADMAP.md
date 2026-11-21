@@ -2352,6 +2352,7 @@ Owner: open · Status: in progress
       — claimed: Afloat16, branch bugfix/r3.11-standin-empty-304-20261103
 - [ ] Godot format 4 and IL2CPP metadata 38 and 39 are header-only; read their tables once a real
       file can be checked
+      — claimed: scks1 (Godot format 4 half), branch feature/r3.11-godot4-pack-tables
 - [x] Bun: take each module's stored source map and bytecode out as files.
       — claimed: Afloat16, branch feature/r3.11-bun-module-payloads
 - [x] A standalone `.pyz`: a PyInstaller PYZ archive given on its own is its own packed reader

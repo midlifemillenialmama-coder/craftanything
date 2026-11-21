@@ -509,6 +509,21 @@ pub fn pill_sized(ui: &mut Ui, text: &str, fg: Color32, bg: Color32, text_size: 
     resp
 }
 
+/// A status label as tall as a [`secondary`] button, with the same padding and corners, so it sits
+/// level with the buttons beside it in a row. [`pill`] stays the small one for running text.
+pub fn status_chip(ui: &mut Ui, text: &str, fg: Color32, bg: Color32) -> Response {
+    let t = Tokens::get(ui.ctx());
+    let label = tr(text);
+    let g = label_galley(ui, &label, 12.0, fg);
+    let pad = ui.spacing().button_padding;
+    let size = Vec2::new(g.size().x + pad.x * 2.0 + 6.0, (g.size().y + pad.y * 2.0 + 6.0).max(30.0));
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+    ui.painter().rect_filled(rect, t.radius, bg);
+    ui.painter().galley_with_override_text_color(rect.center() - g.size() / 2.0, g, fg);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
+    resp
+}
+
 /// The "how sure are we" badge: a coloured dot and the plain label.
 pub fn confidence_badge(ui: &mut Ui, c: Option<Confidence>) -> Response {
     let col = confidence_color(c);

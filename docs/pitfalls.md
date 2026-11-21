@@ -1142,6 +1142,14 @@ backends from older versions or found from a key got a new id on every run. A fa
 run is a workaround, not a fix: give each saved provider backend its id once, at startup, before
 any session lock is held (`AiHub::ensure_session_id`), and test a restart keeps the same id.
 
+**A path checked where it was made, read somewhere else.** The pictures shown to a builder were
+read with `root.join(path)`, trusting each path as its producer wrote it: `build_file_read` had
+checked its own, but a note's picture was only checked by its text, and any tool's result with a
+`picture` field was opened. `../x.png`, an absolute path or a link in the project would have sent
+a file from outside the project to a model (review of #1183 and #1184). Check containment where
+the file is read: refuse absolute paths and `..`, resolve both sides, compare. Test each of those
+and a link that stays inside. Open files only from the result of the one tool meant to name them.
+
 ## Agent tooling
 
 **Shared CLI efforts reached Claude unchanged.** Keep CLI-only levels available for agents, but

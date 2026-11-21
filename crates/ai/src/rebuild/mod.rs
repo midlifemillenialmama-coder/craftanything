@@ -47,6 +47,7 @@ pub mod kinds;
 mod locate;
 pub mod notes;
 mod output;
+pub(crate) mod pictures;
 pub mod project;
 pub mod question;
 pub mod runs;
@@ -130,7 +131,10 @@ pub struct RunOptions {
     /// which carries attachment paths). `None` adds nothing to the feed.
     pub shown: Option<String>,
     /// The pictures attached to `shown` (their copies in the project), so the feed keeps them
-    /// with the message for Up to bring back.
+    /// with the message for Up to bring back. A builder whose model sees is shown them with the
+    /// run's first message, so they belong to a `message`, which names them: a request of
+    /// pictures alone still has that line as its words (the app's `with_attachments` writes it).
+    /// Without a `message` the run is a Try again, and they aren't shown.
     pub shown_pictures: Vec<PathBuf>,
     /// Pick up a build whose last run stopped part-way (paused, the app closed, the computer
     /// stopped): Study isn't repeated when it was done, and an agent with a saved session is
@@ -188,6 +192,13 @@ pub struct Note {
     /// they're marked told when the builder reads the note or when the after-turn path sends it.
     /// The raw note text stays in [`text`](Self::text), so a later run filters them by its mode.
     pub questions: Vec<AskedQuestion>,
+}
+
+impl Note {
+    /// It has words or pictures, so it's a request of its own; a blank one is dropped.
+    pub fn says_something(&self) -> bool {
+        !self.text.trim().is_empty() || !self.pictures.is_empty()
+    }
 }
 
 /// The note text with the latest Just-ask answers this mode may show. `skip` holds answers an
@@ -298,7 +309,14 @@ impl RebuildRun {
                 if !continuing && !ws.capture_dir().exists() {
                     let _ = std::fs::remove_file(ws.transcript_path());
                 }
-                Some(hub.start_builder(&entry, opts.beginner, Some(ws.transcript_path()), run_deep, Some(notes::notes_dir(&ws.inbox_dir())))?)
+                Some(hub.start_builder(
+                    &entry,
+                    opts.beginner,
+                    Some(ws.transcript_path()),
+                    run_deep,
+                    Some(ws.root.clone()),
+                    Some(notes::notes_dir(&ws.inbox_dir())),
+                )?)
             }
         };
         // A chosen extractor (an API backend, e.g. Kimi K3) takes a game's files out after a fresh
@@ -694,9 +712,11 @@ impl Worker {
         Ok(())
     }
 
-    /// The prompt for notes the person added while the agent worked, if there are any, and the
-    /// Just-ask answers it carries so they're marked told once the turn finishes.
-    fn added(&self, ws: &mut Workspace, deep: bool, sees_pictures: bool) -> Option<(String, Vec<AskedQuestion>)> {
+    /// What the person added while the builder worked, as the next message, if there's anything:
+    /// with the Just-ask answers it tells the builder about (marked told once the turn finishes)
+    /// and the pictures the notes carry (relative to the project, each once). A note counts if it
+    /// has words or pictures; one of pictures alone is named as that.
+    fn added(&self, ws: &mut Workspace, deep: bool, sees_pictures: bool) -> Option<(String, Vec<AskedQuestion>, Vec<PathBuf>)> {
         let mut notes = std::mem::take(&mut *self.notes.lock().unwrap_or_else(PoisonError::into_inner));
         if notes.is_empty() {
             return None;
@@ -706,7 +726,7 @@ impl Worker {
         for n in &notes {
             notes::forget(&dir, n.id);
         }
-        notes.retain(|n| !n.text.trim().is_empty());
+        notes.retain(Note::says_something);
         if notes.is_empty() {
             return None;
         }
@@ -723,8 +743,18 @@ impl Worker {
         let mut questions = attached;
         questions.extend(extra);
         let context = just_asked(&questions);
-        let texts: Vec<String> = notes.into_iter().map(|n| n.text).collect();
-        Some((context + &added_prompt(&texts) + &pictures_reminder(ws, sees_pictures), questions))
+        let pictures = pictures::in_project(&ws.root, &notes.iter().flat_map(|n| n.pictures.iter().cloned()).collect::<Vec<_>>());
+        let texts: Vec<String> = notes
+            .into_iter()
+            .map(|n| {
+                if !n.text.trim().is_empty() {
+                    return n.text;
+                }
+                let names = pictures::in_project(&ws.root, &n.pictures).iter().map(|p| p.display().to_string().replace('\\', "/")).collect::<Vec<_>>();
+                format!("Pictures, with no words ({}): they show what the person means.", names.join(", "))
+            })
+            .collect();
+        Some((context + &added_prompt(&texts) + &pictures_reminder(ws, sees_pictures), questions, pictures))
     }
 
     /// Decides an ACP builder's permission requests with the same policy Claude Code's approval
@@ -880,9 +910,11 @@ impl Worker {
         // A coding agent resumes its own session; our loop resumes its kept transcript.
         let resumable = api.as_ref().is_none_or(crate::agent::ApiConversation::resumed);
         let api_loop = api.is_some();
-        // Agent apps open pictures with their Read tool; the API loop sends text only, so its
-        // builder is told what to use instead (R5.4: models that can see get pictures later).
-        let sees_pictures = !api_loop;
+        // Agent apps open pictures with their Read tool. In the API loop the model is shown them
+        // attached to its messages when it sees (its vision setting, or what its server says);
+        // one that doesn't is told what to use instead.
+        let sees_pictures = api.as_ref().is_none_or(crate::agent::ApiConversation::sees_pictures);
+        let attaches = api_loop && sees_pictures;
         // A session another coding agent saved can't be continued by this one (#469).
         if !api_loop && ws.manifest.agent_session_by.as_deref() != Some(entry.config.model.as_str()) {
             ws.manifest.agent_session = ws.manifest.agent_session_for(&entry.config.model).map(str::to_string);
@@ -927,7 +959,7 @@ impl Worker {
             None if carrying_on && !first && has_history => continue_prompt(kind, api_loop) + &now(),
             _ => {
                 let b = brief(kind, &cx, opts.message.as_deref());
-                if api_loop { format!("{API_BUILDER}{}\n\n{b}", if sees_pictures { "" } else { BLIND_BUILDER }) } else { b }
+                if api_loop { format!("{API_BUILDER}{}\n\n{b}", if sees_pictures { SIGHTED_API_BUILDER } else { BLIND_BUILDER }) } else { b }
             }
         };
         // The extraction step left the original's files in app/Original/: the builder starts from them.
@@ -957,10 +989,18 @@ impl Worker {
         } else if ws.manifest.not_working_checks >= NOT_WORKING_CHECK_LIMIT {
             return Err(not_working(ws));
         }
-        let mut refinements = 0;
-        let mut reminded = false;
         // The builder finished and only the check didn't: the build is there to check.
         let mut only_check = carrying_on && !first && opts.message.is_none() && ws.manifest.awaiting_check;
+        // Each run's conversation starts without the pictures' bytes (a kept transcript has only
+        // their names), so the original's go with its first message, after the pictures the person
+        // attached to this request (they show what they mean). A run that only checks sends its first
+        // message after the check, with the check's pictures, the original's among them.
+        if attaches && !only_check {
+            let attached = if new_request { pictures::in_project(&ws.root, &opts.shown_pictures) } else { Vec::new() };
+            self.show_pictures(agent.as_mut(), ws, pictures::for_first_message(ws, &attached, crate::agent::MAX_PICTURES));
+        }
+        let mut refinements = 0;
+        let mut reminded = false;
         loop {
             if !std::mem::take(&mut only_check) {
                 progress = BuildProgress::load(&ws.root)?;
@@ -1032,11 +1072,14 @@ impl Worker {
                     progress.save(&ws.root)?;
                 }
                 // What the person added while the agent worked goes in before anything else.
-                if let Some((p, more)) = self.added(ws, deep, sees_pictures) {
+                if let Some((p, more, added_pictures)) = self.added(ws, deep, sees_pictures) {
                     asked.extend(more);
                     progress.reset();
                     progress.save(&ws.root)?;
                     ws.manifest.not_working_checks = 0;
+                    if attaches {
+                        self.show_pictures(agent.as_mut(), ws, (added_pictures.clone(), 0));
+                    }
                     prompt = p;
                     continue;
                 }
@@ -1062,11 +1105,14 @@ impl Worker {
             for c in &checks {
                 self.emit(RunEvent::Checked(c.clone()));
             }
-            if let Some((p, more)) = self.added(ws, deep, sees_pictures) {
+            if let Some((p, more, added_pictures)) = self.added(ws, deep, sees_pictures) {
                 asked.extend(more);
                 progress.reset();
                 progress.save(&ws.root)?;
                 ws.manifest.not_working_checks = 0;
+                if attaches {
+                    self.show_pictures(agent.as_mut(), ws, (added_pictures.clone(), 0));
+                }
                 prompt = p;
                 continue;
             }
@@ -1095,6 +1141,10 @@ impl Worker {
             // It is asked to write the project and to show its build output (#736).
             let refined = if app_is_empty(ws) { NO_PROJECT_PROMPT.to_string() } else { kind.refine(check, sees_pictures) };
             prompt = refined + &pictures_reminder(ws, sees_pictures);
+            if attaches {
+                let root = ws.root.clone();
+                self.show_pictures(agent.as_mut(), ws, pictures::for_check(&checks, opts.good_enough, crate::agent::MAX_PICTURES, |p| root.join(p).is_file()));
+            }
             if !api_loop {
                 prompt.push_str(CHECK_BEFORE_REPLYING);
             }
@@ -1123,6 +1173,24 @@ impl Worker {
         ws.set_status(Status::Ready, summary.clone())?;
         self.emit(RunEvent::Step { step: Step::Done, text: summary.clone() });
         Ok(summary)
+    }
+
+    /// Attach pictures (project-relative, picked within [`crate::agent::MAX_PICTURES`], with
+    /// `left_out` more that didn't fit) to the builder's next message; saying in the feed which
+    /// couldn't be shown and why.
+    fn show_pictures(&self, agent: &mut dyn Conversation, ws: &Workspace, (paths, mut left_out): (Vec<PathBuf>, usize)) {
+        let max = crate::agent::MAX_PICTURES;
+        left_out += paths.len().saturating_sub(max);
+        let (shown, mut skipped) = pictures::load(&ws.root, paths.get(..max).unwrap_or(&paths));
+        if left_out > 0 {
+            skipped.push(format!("{left_out} more (at most {max} go with one message)"));
+        }
+        if !skipped.is_empty() {
+            self.emit(RunEvent::Agent(AgentEvent::Status { text: format!("Not shown to the builder: {}.", skipped.join(", ")) }));
+        }
+        if !shown.is_empty() {
+            agent.attach(shown);
+        }
     }
 
     /// Read progress after the turn has ended. A consumed request resets the allowance on
@@ -1425,7 +1493,7 @@ impl Worker {
             *notes = waiting;
             read
         };
-        let new_request = read.iter().any(|n| !n.text.trim().is_empty());
+        let new_request = read.iter().any(Note::says_something);
         for n in read {
             // The agent's hook took the note, so the Just-ask answers in its text were told.
             if !n.questions.is_empty()
@@ -1595,6 +1663,9 @@ fn kept_session(ws: &Workspace) -> Option<String> {
 
 /// What an API-backend builder is told first: its tools differ from an agent app's.
 const API_BUILDER: &str = "Your tools: build_files_list, build_file_read, build_file_write and build_file_edit for the project's files (paths relative to the project folder, e.g. app/src/main.rs), and build_command_run for commands, which run in app/ (never start dev servers or watchers). Where the steps below mention Read, Write, Edit or Bash, use these. For the checklist step use build_checklist (the same shape as TodoWrite: todos with content, activeForm and status) and call it again as you go. Ask the person with core_person_ask only when a choice really changes the result. Other Craft Anything tools are available too; enable a toolset with enable_toolset when you need it. rebuild_check isn't available in this loop: Craft Anything checks your build after each turn instead.";
+
+/// Added to the API loop's note for a builder whose model sees pictures: they come attached.
+const SIGHTED_API_BUILDER: &str = " You're shown the pictures that matter, each after a line naming it: the person's pictures in reference/ and the original's screenshots in capture/ with this message, and after each check its pictures of your build beside the original's. To look at another picture in the project, open it with build_file_read: it's shown after the result. Where the steps below say to open a picture with Read, use build_file_read, or look at the one already shown under that name.";
 
 /// Added to the API loop's note for a builder that can't look at pictures.
 const BLIND_BUILDER: &str = " You can't look at pictures: use capture/README.md, capture/capture.json and the evidence instead.";

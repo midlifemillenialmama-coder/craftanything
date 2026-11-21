@@ -378,10 +378,10 @@ fn an_api_transcript_is_resumed_only_in_its_mode() {
     let path = dir.path().join("transcript.json");
     let history = vec![crate::model::Msg::user_text("a Deep conversation")];
     crate::context::save(&path, &history, true).unwrap();
-    assert!(h.start_builder(&entry, false, Some(path.clone()), true, None).unwrap().resumed(), "Deep continues a Deep transcript");
-    assert!(!h.start_builder(&entry, false, Some(path.clone()), false, None).unwrap().resumed(), "Clean room starts fresh");
+    assert!(h.start_builder(&entry, false, Some(path.clone()), true, None, None).unwrap().resumed(), "Deep continues a Deep transcript");
+    assert!(!h.start_builder(&entry, false, Some(path.clone()), false, None, None).unwrap().resumed(), "Clean room starts fresh");
     crate::context::save(&path, &history, false).unwrap();
-    assert!(!h.start_builder(&entry, false, Some(path), true, None).unwrap().resumed(), "Deep doesn't continue a Clean room transcript");
+    assert!(!h.start_builder(&entry, false, Some(path), true, None, None).unwrap().resumed(), "Deep doesn't continue a Clean room transcript");
 }
 
 /// Compare checks either position; enabled named and automatic chat choices still work.
@@ -782,6 +782,28 @@ fn an_ais_model_is_changed() {
     assert_eq!(h.options().get("Claude").and_then(|o| o.cli_model.as_deref()), Some("my-custom-model"));
     assert!(h.set_model("Claude", crate::anthropic::CLAUDE_CODE_DEFAULT).unwrap());
     assert_eq!(h.options().get("Claude").and_then(|o| o.cli_model.clone()), None);
+}
+
+/// A server reached over ssh isn't asked here (no tunnel is opened just for it), and a build asks
+/// through its own, so Auto can't say yet whether its model is shown pictures; a set answer can.
+#[test]
+fn a_server_over_ssh_isnt_asked_whether_its_model_sees_until_a_build() {
+    let (h, _d) = hub();
+    let remote = BackendConfig {
+        name: "Remote".into(),
+        kind: BackendKind::OpenaiCompatible,
+        model: "qwen".into(),
+        base_url: Some("http://127.0.0.1:9/v1".into()),
+        ssh_host: Some("gpu-box".into()),
+        enabled: true,
+    };
+    assert!(remote.over_ssh());
+    assert!(!BackendConfig { ssh_host: Some("  ".into()), ..remote.clone() }.over_ssh(), "a blank host is no host");
+    h.add_backend(remote, None).unwrap();
+    let auto = h.vision("Remote").unwrap();
+    assert_eq!((auto.read, auto.over_ssh, auto.sees()), (None, true, None));
+    assert!(h.set_vision("Remote", Some(crate::Vision::Yes)).unwrap());
+    assert_eq!(h.vision("Remote").unwrap().sees(), Some(true));
 }
 
 /// Every Claude effort level can be chosen for the Claude API and Claude Code, and only for them.

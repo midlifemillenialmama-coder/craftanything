@@ -26,12 +26,31 @@ pub mod price;
 pub mod prompt;
 pub mod providers;
 pub mod rebuild;
+pub mod sight;
 pub mod ssh;
 pub mod window;
 
+/// A backend's vision setting and what its server says ([`AiHub::vision`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisionRead {
+    pub setting: Vision,
+    /// What its server says; `None` when it doesn't say, or wasn't asked.
+    pub read: Option<sight::Sight>,
+    /// Reached over ssh, so not asked here: a build asks through its tunnel.
+    pub over_ssh: bool,
+}
+
+impl VisionRead {
+    /// Whether its model is shown pictures, or `None` when that's decided only when a build
+    /// starts (Auto over ssh).
+    pub fn sees(&self) -> Option<bool> {
+        (self.setting != Vision::Auto || !self.over_ssh).then(|| sight::sees(self.setting, self.read))
+    }
+}
+
 pub use agent::FULL_TOOLS_BUDGET;
 pub use cli_agents::models::{AgentModel, ModelContext};
-pub use config::{AiConfig, BackendEntry, BackendOptions, Price, ToolList};
+pub use config::{AiConfig, BackendEntry, BackendOptions, Price, ToolList, Vision};
 pub use failure::{FailureKind, TurnFailure};
 pub use keys::KeyStore;
 pub use model::Effort;
@@ -133,6 +152,14 @@ pub struct BackendConfig {
     pub ssh_host: Option<String>,
     #[serde(default = "yes")]
     pub enabled: bool,
+}
+
+impl BackendConfig {
+    /// Reached through an ssh tunnel (`ssh_host`). Settings and the CLI don't open one just to
+    /// ask its server something; a build asks through its own.
+    pub fn over_ssh(&self) -> bool {
+        self.ssh_host.as_deref().is_some_and(|h| !h.trim().is_empty())
+    }
 }
 
 fn yes() -> bool {
@@ -382,6 +409,11 @@ pub enum AgentEvent {
 /// A chat with the agent about the current session.
 pub trait Conversation: Send {
     fn send(&mut self, text: &str);
+    /// Show these pictures ([`model::Block::Image`]) with the next message sent. A conversation
+    /// that can't carry them ignores them: an agent app opens pictures with its own tools.
+    fn attach(&mut self, pictures: Vec<model::Block>) {
+        let _ = pictures;
+    }
     /// Retry an interrupted turn. Stateless adapters resend `text`; a conversation that keeps
     /// its own history can continue it without appending the user's message again.
     fn retry(&mut self, text: &str) {
@@ -460,6 +492,10 @@ impl ChatModel for Tunneled {
 
     fn context_window(&self) -> Option<window::Window> {
         self.inner.context_window()
+    }
+
+    fn sees_pictures(&self) -> Option<sight::Sight> {
+        self.inner.sees_pictures()
     }
 }
 
@@ -899,6 +935,37 @@ impl AiHub {
         Ok(entry.options.requests_per_minute.filter(|rate| *rate != 0))
     }
 
+    /// Set whether an API backend's model sees pictures (`None`: Auto, what its server says).
+    /// Returns whether the backend exists.
+    pub fn set_vision(&self, name: &str, vision: Option<Vision>) -> Result<bool, ToolError> {
+        let mut cfg = self.config_to_change()?;
+        let Some(b) = cfg.backends.iter_mut().find(|b| b.config.name == name) else { return Ok(false) };
+        if b.config.kind == BackendKind::AgentCli {
+            return Err(ToolError::invalid(format!("{name} is an agent app, which opens pictures with its own tools."))
+                .with_remediation("Whether a model sees pictures is set for API backends."));
+        }
+        b.options.vision = vision.filter(|v| *v != Vision::Auto);
+        self.save_config(&cfg)?;
+        Ok(true)
+    }
+
+    /// A backend's vision setting and what its server says, for showing what Auto works out to
+    /// (`ai vision`). A backend over ssh, or one that can't be built, isn't asked; over ssh, a
+    /// build still asks through its tunnel, so [`VisionRead::sees`] can't say yet. Blocking
+    /// (bounded); run it off the UI thread.
+    pub fn vision(&self, name: &str) -> Result<VisionRead, ToolError> {
+        let e = self.entry(name)?;
+        if e.config.kind == BackendKind::AgentCli {
+            return Err(ToolError::invalid(format!("{name} is an agent app, which opens pictures with its own tools."))
+                .with_remediation("Whether a model sees pictures is set for API backends."));
+        }
+        let setting = e.options.vision.unwrap_or_default();
+        let over_ssh = e.config.over_ssh();
+        // A set answer needs no question to the server.
+        let read = if setting != Vision::Auto || over_ssh { None } else { self.build_model(&e).ok().and_then(|s| s.model.sees_pictures()) };
+        Ok(VisionRead { setting, read, over_ssh })
+    }
+
     /// The models a backend can be set to: the API's or registered agent's list.
     /// Empty for an agent app that picks its own. Blocking (bounded); run it off the UI thread.
     pub fn model_choices(&self, name: &str) -> Result<Vec<String>, ToolError> {
@@ -1190,6 +1257,7 @@ impl AiHub {
             max_turns: e.options.max_turns.unwrap_or(agent::DEFAULT_MAX_TURNS),
             context_tokens: e.options.context_tokens.unwrap_or(0),
             tools: e.options.tools.unwrap_or_default(),
+            vision: e.options.vision.unwrap_or_default(),
         })
     }
 
@@ -1232,18 +1300,19 @@ impl AiHub {
     /// every toolset is enabled, so it can look inside the original with all of them.
     /// `transcript`: where the conversation is kept, and resumed from when it's there in this
     /// mode. `deep` is the run's mode, given by the caller: a tool that starts a build holds the
-    /// session (#1102). `notes`: the build's notes folder, read between tool steps.
+    /// session (#1102). `project` confines opened pictures; `notes`: the build's notes folder, read between tool steps.
     pub fn start_builder(
         &self,
         entry: &BackendEntry,
         beginner: bool,
         transcript: Option<PathBuf>,
         deep: bool,
+        project: Option<PathBuf>,
         notes: Option<PathBuf>,
     ) -> Result<ApiConversation, ToolError> {
         use craft_anything_engine::Toolset;
         let toolsets = if deep { self.engine.registry().toolsets() } else { vec![Toolset::Core, Toolset::Build] };
-        self.start_loop(entry, &toolsets, LoopConfig { beginner, transcript, deep, lean_for_local: true, notes, ..LoopConfig::default() })
+        self.start_loop(entry, &toolsets, LoopConfig { beginner, transcript, deep, lean_for_local: true, project, notes, ..LoopConfig::default() })
     }
 
     /// Start the asset extractor: our agent loop with the Build tools and the game archive tools.

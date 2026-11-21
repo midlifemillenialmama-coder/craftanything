@@ -45,8 +45,9 @@ pub fn hand_over(dir: &Path, id: u64, text: &str, left: Option<&Left>) -> Result
 
 /// The notes an earlier run left waiting (the app closed before the builder took them, #1620),
 /// oldest first. A file without the person's words (from before they were kept) can't be sent
-/// safely and is left out, as is one that isn't a note; read notes were handed over already. A
-/// folder or file that can't be read is an error, not "no notes".
+/// safely and is left out, as is one that isn't a note or says nothing (no words, no pictures: a
+/// note of pictures alone is a request, as it is to a running build); read notes were handed over
+/// already. A folder or file that can't be read is an error, not "no notes".
 fn left(dir: &Path) -> std::io::Result<Vec<Left>> {
     let entries = match std::fs::read_dir(dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -63,7 +64,7 @@ fn left(dir: &Path) -> std::io::Result<Vec<Left>> {
     for id in ids {
         let bytes = std::fs::read(pending(dir, id))?;
         let note = serde_json::from_slice::<serde_json::Value>(&bytes).ok().and_then(|file| serde_json::from_value::<Left>(file.get("left")?.clone()).ok());
-        notes.extend(note.filter(|l| !l.text.trim().is_empty()));
+        notes.extend(note.filter(|l| !l.text.trim().is_empty() || !l.pictures.is_empty()));
     }
     Ok(notes)
 }
@@ -114,17 +115,29 @@ pub fn clear(dir: &Path) {
 /// For the agent's hook: claim every waiting note, oldest first, and return their texts. A note
 /// another claimer (or "take back") got first is skipped.
 pub fn claim(dir: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    claim_with_pictures(dir).0
+}
+
+/// The API builder receives a claimed note's attachments along with its words. Claiming only
+/// the words would mark its pictures read before the end-of-turn handoff can deliver them.
+pub(crate) fn claim_with_pictures(dir: &Path) -> (Vec<String>, Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return (Vec::new(), Vec::new()) };
     let mut ids: Vec<u64> =
         entries.flatten().filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".json")).and_then(|n| n.parse::<u64>().ok())).collect();
     ids.sort_unstable();
-    ids.into_iter()
-        .filter_map(|id| {
-            let text = std::fs::read(pending(dir, id)).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())?;
-            std::fs::rename(pending(dir, id), read(dir, id)).ok()?;
-            text.get("text").and_then(serde_json::Value::as_str).map(String::from)
-        })
-        .collect()
+    let (mut texts, mut pictures) = (Vec::new(), Vec::new());
+    for id in ids {
+        let Some(file) = std::fs::read(pending(dir, id)).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()) else { continue };
+        if std::fs::rename(pending(dir, id), read(dir, id)).is_err() {
+            continue;
+        }
+        let Some(text) = file.get("text").and_then(serde_json::Value::as_str) else { continue };
+        texts.push(text.to_string());
+        if let Some(left) = file.get("left").cloned().and_then(|v| serde_json::from_value::<Left>(v).ok()) {
+            pictures.extend(left.pictures);
+        }
+    }
+    (texts, pictures)
 }
 
 /// The notes as context for the builder's next step, or nothing: what a coding agent's hook
@@ -179,10 +192,15 @@ mod tests {
         hand_over(&dir, 2, "make it blue", Some(&note("make it blue"))).unwrap();
         hand_over(&dir, 3, "taken by the hook", Some(&note("taken by the hook"))).unwrap();
         hand_over(&dir, 4, "from an older version", None).unwrap();
-        hand_over(&dir, 5, " ", Some(&note(" "))).unwrap();
+        hand_over(&dir, 5, " ", Some(&Left { text: " ".into(), shown: String::new(), pictures: Vec::new() })).unwrap();
         std::fs::write(dir.join("6.json"), b"{not json").unwrap();
+        hand_over(&dir, 7, "", Some(&note(""))).unwrap();
         std::fs::rename(dir.join("3.json"), dir.join("3.read.json")).unwrap();
-        assert_eq!(left(&dir).unwrap(), [note("make it blue"), note("add a form")], "oldest first, the person's words without the answers");
+        assert_eq!(
+            left(&dir).unwrap(),
+            [note("make it blue"), note(""), note("add a form")],
+            "oldest first, the person's words without the answers; a blank note is dropped, one of pictures alone kept"
+        );
         assert_eq!(claim(&dir)[0], "make it blue", "the hook still reads the hand-over text");
     }
 

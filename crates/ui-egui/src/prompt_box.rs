@@ -539,4 +539,16 @@ mod tests {
         h.run();
         assert_eq!(h.state().stops, 1, "pressing it again changes nothing");
     }
+
+    /// A message of pictures alone still has words: the line naming them, which the run needs to
+    /// show a builder its pictures (`RunOptions::shown_pictures`) and a note needs to be sent.
+    #[test]
+    fn a_message_of_pictures_alone_names_them() {
+        let root = std::path::Path::new("/projects/blue");
+        let files = [root.join("attachments/picture-1.png"), root.join("attachments/picture-2.png")];
+        let text = with_attachments("", &files, root);
+        assert!(!text.trim().is_empty());
+        assert!(text.contains("Attached pictures: attachments/picture-1.png, attachments/picture-2.png."), "{text}");
+        assert_eq!(with_attachments("Make it blue.", &[], root), "Make it blue.", "no pictures, no line");
+    }
 }

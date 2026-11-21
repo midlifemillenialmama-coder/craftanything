@@ -877,9 +877,9 @@ impl CraftApp {
         if self.settings_dirty
             && let Some(mut s) = self.engine.try_session()
         {
-            // The Ghidra folder changed: look for it again.
-            if s.settings.engines.ghidra.install_dir != self.settings.engines.ghidra.install_dir {
-                self.ghidra.found = None;
+            // A Ghidra setting changed (its folder, its Java): look for it again.
+            if s.settings.engines.ghidra != self.settings.engines.ghidra {
+                self.ghidra.status = None;
             }
             // The `ai` table belongs to the ai crate (it edits it in the session); keep its copy.
             self.settings.ai = s.settings.ai.clone();

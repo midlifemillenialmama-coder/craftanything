@@ -529,6 +529,8 @@ pub struct CraftApp {
     pub usage: std::collections::HashMap<PathBuf, usage::ProjectClock>,
     /// All AI use since the app opened: builds and chat.
     pub session_usage: craft_anything_engine::workspace::ProjectUsage,
+    /// What each project's latest run has used so far, shown beside Try again when it fails.
+    last_run: std::collections::HashMap<PathBuf, usage::RunTally>,
     /// The project shown on the Project screen.
     pub workspace: Option<craft_anything_engine::workspace::Workspace>,
     /// Every project in the projects folder, newest first.
@@ -665,6 +667,7 @@ impl CraftApp {
             start_after_pictures: None,
             usage: Default::default(),
             session_usage: Default::default(),
+            last_run: Default::default(),
             workspace: None,
             projects: Vec::new(),
             preview: None,

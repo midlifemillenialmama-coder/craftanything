@@ -412,10 +412,14 @@ Every round spends the person's money or quota. One that can't do anything shoul
 - [ ] An unreadable `usage.json` now stops a project's usage from being counted at all (every
       update is refused and logged). Say so where the person can act on it, for example offer to
       set the file aside and start counting again
-- [ ] Show what the last run used next to Try again. `usage.json` keeps project totals only
+- [x] Show what the last run used next to Try again. `usage.json` keeps project totals only
       (time, tokens, `cost_usd`, `api_billed_usd`); the activity log has each turn's tokens but
       no cost, since a resumed agent's figure can't be tied to one turn (`activity.rs`). Show
-      the run's tokens, and a cost only where it can be attributed
+      the run's tokens, and a cost only where it can be attributed. The app adds up the run's
+      `TurnDone` events (`usage::RunTally`) and shows a cost only when every turn reported its
+      own; otherwise tokens only, saying why — PR #2236
+- [ ] The Try again line is kept in memory only: after a restart the error card has no line, and
+      the CLI and MCP see each turn's `TurnDone` but no run total
 - [ ] **decision** Whether a build gets a token or cost limit of its own, beyond rounds and that
       stop (#399): a model that changes code without ever running a build isn't caught by it.
       One shape: price each builder turn before it runs, as asset calls already are

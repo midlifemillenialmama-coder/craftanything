@@ -184,6 +184,8 @@ impl CraftApp {
     /// Start a run, or queue it when as many as Settings allows are already building.
     fn launch(&mut self, ws: Workspace, opts: RunOptions) -> Result<Started, craft_anything_engine::evidence::ToolError> {
         self.runs.set_limit(self.settings.build.parallel);
+        // Cleared even when the start fails, so an error card never shows an earlier run's use.
+        self.last_run.remove(&ws.root);
         self.runs.start(&self.hub, ws, opts)
     }
 
@@ -336,6 +338,7 @@ impl CraftApp {
                     clock.saved_again(root, true);
                     self.session_usage.tokens_incomplete |= *tokens_unknown;
                     self.session_usage.add_turn(*input_tokens, *output_tokens, *cost_usd, *cost_is_estimate);
+                    self.last_run.entry(root.clone()).or_default().add_turn(*input_tokens, *output_tokens, *tokens_unknown, *cost_usd, *cost_is_estimate);
                 }
                 // A run's first event is its first step: the clock starts there.
                 _ if !clock.working() => clock.saved_again(root, true),
@@ -1469,6 +1472,9 @@ fn draw_items(
                                     ui.ctx().copy_text(cmd.to_string());
                                 }
                             });
+                            if let Some(words) = app.last_run.get(&ws.root).and_then(crate::usage::RunTally::words) {
+                                ui.add(egui::Label::new(RichText::new(words).color(t.text_dim).size(theme::SMALL)).wrap());
+                            }
                         }
                     });
             }

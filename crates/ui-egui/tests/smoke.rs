@@ -2308,6 +2308,67 @@ fn a_note_waiting_for_the_builder_can_be_taken_back_into_the_prompt_box() {
     h.run_steps(2);
 }
 
+/// R5.3: a failed run says beside Try again what it used, its cost only when every turn reported
+/// one, and the next run counts only its own turns.
+#[test]
+fn a_failed_run_shows_what_it_used_beside_try_again() {
+    use craft_anything_ai::AgentEvent;
+    use craft_anything_ai::rebuild::{RunEvent, StandIns};
+    use craft_anything_engine::workspace::{TargetRef, Workspace};
+    use egui_kittest::kittest::NodeT;
+    let d = tempfile::tempdir().unwrap();
+    let a = Workspace::create(d.path(), "Alpha", "A notes app", TargetRef::None).unwrap();
+    let runs = StandIns::new();
+    let (dir, r) = (d.path().to_path_buf(), runs.clone());
+    let mut h = harness(move || stand_in_app(dir, &r));
+    h.run_steps(2);
+    h.state_mut().open_workspace(a.clone());
+    h.state_mut().follow_up(Some("Add tags".into()));
+    h.run_steps(2);
+    let turn = |cost_usd| {
+        RunEvent::Agent(AgentEvent::TurnDone {
+            backend: "Claude Code".into(),
+            input_tokens: 9_000,
+            output_tokens: 3_000,
+            tokens_unknown: false,
+            cost_usd,
+            cost_is_estimate: true,
+        })
+    };
+    let fail = |runs: &StandIns| {
+        let message = "The builder stopped.".to_string();
+        assert!(runs.send(&a.root, RunEvent::Agent(AgentEvent::Error { message: message.clone(), remediation: None, log: None })));
+        assert!(runs.send(&a.root, RunEvent::Finished { ok: false, message, paused: false }));
+    };
+    let used = |h: &Harness<'_, CraftApp>| {
+        h.query_all_by_label_contains("This run used").map(|n| n.accesskit_node().label().or_else(|| n.value()).unwrap_or_default()).collect::<Vec<_>>()
+    };
+
+    assert!(runs.send(&a.root, turn(Some(0.25))));
+    assert!(runs.send(&a.root, turn(Some(0.25))));
+    fail(&runs);
+    h.run_steps(3);
+    let shown = used(&h);
+    assert!(shown.len() == 1 && shown[0].contains("24k tokens") && shown[0].contains("$0.50"), "{shown:?}");
+
+    // Try again: one turn with no cost of its own, so tokens only, and only this run's.
+    h.get_by_label("Try again").click();
+    h.run_steps(2);
+    assert!(used(&h).is_empty(), "nothing beside a run that is working");
+    assert!(runs.send(&a.root, turn(None)));
+    fail(&runs);
+    h.run_steps(3);
+    let shown = used(&h);
+    assert!(shown.len() == 1 && shown[0].contains("12k tokens") && shown[0].contains("isn't known") && !shown[0].contains('$'), "{shown:?}");
+
+    // A run that ended before any turn finished used nothing it can say.
+    h.get_by_label("Try again").click();
+    h.run_steps(2);
+    fail(&runs);
+    h.run_steps(3);
+    assert!(used(&h).is_empty(), "{:?}", used(&h));
+}
+
 #[test]
 fn up_in_the_prompt_box_takes_back_the_last_waiting_note() {
     use craft_anything_ai::rebuild::StandIns;

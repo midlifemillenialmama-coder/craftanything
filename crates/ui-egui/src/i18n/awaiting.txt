@@ -27,3 +27,6 @@ Stopped the sign-in.
 Wait until the new project is made.
 This project's usage record couldn't be read, so what its builds spent isn't known.
 Arguments in square brackets must be a list of quoted words, like ["--port", "8080"]. Or leave out the brackets and separate them with spaces.
+This run used {tokens}, {cost}.
+This run used {tokens}. Its cost isn't known: not every turn reported its own.
+This run's builder didn't report how many tokens it used.

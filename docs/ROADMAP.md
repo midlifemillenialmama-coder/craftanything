@@ -1949,9 +1949,11 @@ Gaps found while using the app for real projects.
       — claimed: bflatastic, branch bugfix/claude-session-too-long
 - [ ] Capture the line Claude Code really prints when its conversation is too long, and decide on
       a typed field of it if there is one, not on its words (review of #2043)
-- [ ] A note the builder's hook took during a turn that ends with a lost or too-long conversation
+- [x] A note the builder's hook took during a turn that ends with a lost or too-long conversation
       isn't in the new conversation's first message, though the feed shows it as delivered
-      (review of #2043). Hand such a note on with the fresh start, for a missing session as well
+      (review of #2043). Such a note now follows the fresh start (`taken_prompt`), and with no
+      fresh start it waits for the next run
+      — claimed: justinjohn0306, branch bugfix/r2.9-note-across-fresh-start
 - [x] `build_file_edit` read the whole project file into memory before replacing text; it now
       uses the same 16 MiB cap as a read, refusing a larger file before it is loaded and leaving
       it unchanged. A file at the cap still edits when the result fits the 8 MB write cap. Engine

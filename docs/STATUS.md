@@ -887,6 +887,10 @@ An existing root-level file or directory named `build-progress.json` remains app
 fingerprinted, copied by Duplicate and kept when Craft's project records are removed. Its JSON
 shape does not make it a Craft record, and it is never migrated into the inbox.
 
+A note a builder hook took in a turn whose conversation is then lost (not on this computer, or too
+long to continue) goes into the new conversation's first message, after its start; when there is
+nothing to start one from, the run ends with the note waiting for the next run rather than dropped.
+
 Notes consumed by builder hooks now only queue a progress reset while the turn is running.
 The reset is saved after the successful turn and its `awaiting_check` recovery state are
 persisted. Multiple consumed notes coalesce into one reset; blank notes do not reset the count.

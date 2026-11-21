@@ -549,6 +549,7 @@ fn notes_added_while_it_works_reach_the_agent_at_its_next_step() {
         usage: None,
         self_check: None,
         reset_progress_after_notes: false,
+        taken_in_turn: Vec::new(),
     };
     assert!(w.added(&mut ws, true, true).is_none(), "nothing added, nothing to say");
     use craft_anything_engine::questions::{self, AskedQuestion};
@@ -1498,6 +1499,7 @@ fn an_api_backend_builds_with_the_build_tools() {
         usage: None,
         self_check: None,
         reset_progress_after_notes: false,
+        taken_in_turn: Vec::new(),
     };
     w.attach(&ws).unwrap();
     // The model writes a file with the Build tools, then answers.
@@ -1628,6 +1630,7 @@ fn the_mechanics_sheet_is_required_without_claiming_effective_behavior() {
         usage: None,
         self_check: None,
         reset_progress_after_notes: false,
+        taken_in_turn: Vec::new(),
     };
     let check = |round| w.run_checks(&ws, &SheetKind, round).unwrap().remove(0);
 
@@ -2942,6 +2945,7 @@ pub(crate) fn check_worker(ws: &Workspace, deep: bool) -> Worker {
         usage: None,
         self_check: None,
         reset_progress_after_notes: false,
+        taken_in_turn: Vec::new(),
         keys: crate::KeyStore::file_only(ws.root.join("keys.toml")),
         kept_checks: Mutex::default(),
     }
@@ -3544,6 +3548,7 @@ fn preparing_the_builders_agent_does_not_lock_up() {
         usage: None,
         self_check: None,
         reset_progress_after_notes: false,
+        taken_in_turn: Vec::new(),
     };
     let entry = crate::BackendEntry {
         config: crate::BackendConfig {
@@ -3587,6 +3592,7 @@ fn the_run_answers_the_builders_own_check_during_its_turn() {
         usage: None,
         self_check: Some((Arc::new(SheetKind), 90.0)),
         reset_progress_after_notes: false,
+        taken_in_turn: Vec::new(),
     };
     let mut builder = ChecksItsWork { root: ws.root.clone(), asked: None, reply: None };
     let reply = w.turn(&mut ws, &mut builder, "Build it.", true, None).unwrap();
@@ -3626,6 +3632,7 @@ fn a_stopped_build_answers_the_check_it_took() {
         usage: None,
         self_check: Some((Arc::new(SheetKind), 90.0)),
         reset_progress_after_notes: false,
+        taken_in_turn: Vec::new(),
     };
     let asks = Inbox::new(self_check::asks_dir(&ws.root));
     let id = asks.post(craft_anything_engine::inbox::RequestKind::Question, "Check the build", "", Vec::new(), false, None).unwrap();
@@ -3687,6 +3694,7 @@ fn decompiling_once_is_remembered_by_the_project() {
         usage: None,
         self_check: None,
         reset_progress_after_notes: false,
+        taken_in_turn: Vec::new(),
     };
     let mut builder = Decompiles { events: Vec::new() };
     w.turn(&mut ws, &mut builder, "Build it.", true, None).unwrap();
@@ -3752,6 +3760,7 @@ fn a_build_says_why_it_refused_a_tool_that_needs_consent() {
         usage: None,
         self_check: None,
         reset_progress_after_notes: false,
+        taken_in_turn: Vec::new(),
     };
     let mut builder = AsksConsent::default();
     w.turn(&mut ws, &mut builder, "Build it.", true, None).unwrap();
@@ -3965,6 +3974,7 @@ fn a_note_the_builder_took_at_a_step_joins_the_feed_and_isnt_sent_again() {
         usage: None,
         self_check: None,
         reset_progress_after_notes: false,
+        taken_in_turn: Vec::new(),
     };
     let dir = notes::notes_dir(&ws.inbox_dir());
     notes::hand_over(&dir, 1, "make the header blue", None).unwrap();
@@ -4413,6 +4423,7 @@ fn a_session_left_on_another_computer_starts_a_new_one_from_the_project() {
         usage: None,
         self_check: None,
         reset_progress_after_notes: false,
+        taken_in_turn: Vec::new(),
     };
     let first = resumed_elsewhere("THE BRIEF", &ws.manifest.last_reply, None);
     let reply = w.turn(&mut ws, &mut agent, "The person asks: make it blue", true, Some(first)).unwrap();
@@ -4469,6 +4480,7 @@ fn a_missing_session_with_nothing_to_start_from_is_said_plainly() {
         usage: None,
         self_check: None,
         reset_progress_after_notes: false,
+        taken_in_turn: Vec::new(),
     };
     let e = w
         .turn_with_wait(&mut ws, &mut agent, "Carry on.", true, None, |_, _| panic!("a missing session without a fresh start must not be retried"))
@@ -4536,6 +4548,7 @@ fn the_builders_conversation_travels_with_the_project() {
         usage: None,
         self_check: None,
         reset_progress_after_notes: false,
+        taken_in_turn: Vec::new(),
     };
     let adapter = KeepsSessions(store.path().to_path_buf());
     // No session yet, or one this computer doesn't have: nothing to keep, nothing said.
@@ -4614,6 +4627,7 @@ fn waiting_for_another_analysis(d: &Path, limit_secs: u64) -> (Worker, std::sync
         usage: None,
         self_check: None,
         reset_progress_after_notes: false,
+        taken_in_turn: Vec::new(),
     };
 
     // Another process is already analysing this program: a fresh lock beside its project.
@@ -4695,6 +4709,7 @@ fn a_later_run_opens_the_projects_program_again_for_the_builder() {
             usage: None,
             self_check: None,
             reset_progress_after_notes: false,
+            taken_in_turn: Vec::new(),
         };
         w.reopen_target(&mut ws, app.as_ref(), true, deep).unwrap();
         assert!(w.engine.session().shared_targets().is_empty(), "a builder over SSH isn't handed this computer's targets");

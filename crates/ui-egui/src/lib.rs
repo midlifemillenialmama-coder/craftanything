@@ -615,6 +615,15 @@ impl CraftApp {
         self.updates.startup();
     }
 
+    /// Look for a newer release once the native window begins drawing, when the person allows it
+    /// (Settings → General). Home offers one that is found; no answer says nothing.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn check_for_updates_on_start(&mut self) {
+        if self.settings.check_for_updates {
+            self.updates.check_at_start();
+        }
+    }
+
     /// Initialize UI state from the shared engine's saved settings, waiting rather than substituting defaults.
     pub fn new(engine: Arc<Engine>, hub: Arc<AiHub>) -> Self {
         // Wait for the engine if it's busy: defaults here would show Clean room and no AI, and the

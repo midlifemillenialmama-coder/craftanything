@@ -151,6 +151,7 @@ const ACTIONS: &[Action] = &[
 #[rustfmt::skip]
 const PLUMBING: &[(&str, &str)] = &[
     ("show_update_outcome_on_start", "native startup queues the previous helper result for the first window frame; no document action"),
+    ("check_for_updates_on_start", "native startup queues the release check Help ▸ Check for Updates runs, for Home's notice; no document action"),
     ("load_agent_model_catalog", "worker dispatch shared by the model picker and its reload action"),
     ("check_backend_keys", "a worker that fills the saved-key status rows"),
     ("stuck_banner", "draws what the lock watchdog found; `sync::problems` and its log are the headless side"),

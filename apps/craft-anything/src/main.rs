@@ -150,6 +150,7 @@ fn main() -> eframe::Result {
                 CraftApp::setup_context(&cc.egui_ctx);
                 let mut app = CraftApp::new(engine, hub);
                 app.show_update_outcome_on_start();
+                app.check_for_updates_on_start();
                 // The window is built hidden and its first frame is drawn afterwards, where a graphics
                 // driver may still crash: the mark stays until frames have been shown (#74).
                 app.after_first_frames(move || {

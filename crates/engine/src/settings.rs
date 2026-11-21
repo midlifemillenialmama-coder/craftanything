@@ -118,6 +118,10 @@ pub struct Settings {
     /// (`native_window_capture` into capture/window.png). Off by default: it runs the person's
     /// program.
     pub runtime_study: bool,
+    /// Ask GitHub quietly for a newer Craft Anything when the app opens, and say so on Home.
+    /// The request carries no personal information, but GitHub sees network metadata such as the
+    /// public IP address; a failure is silent.
+    pub check_for_updates: bool,
     /// Recently opened projects and targets.
     pub recent: Vec<PathBuf>,
     /// Where new projects are created; `None` = `Documents/Craft Anything`.
@@ -215,6 +219,7 @@ impl Default for Settings {
             auto_mode: true,
             questions: None,
             runtime_study: false,
+            check_for_updates: true,
             recent: Vec::new(),
             projects_dir: None,
             project_folders: Vec::new(),

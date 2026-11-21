@@ -135,7 +135,7 @@ impl CraftApp {
         if self.runs.is_running(&root) || self.runs.position(&root).is_some() {
             self.state.feed = match self.runs.get_mut(&root).filter(|r| r.is_running()) {
                 Some(run) => run.feed_now(),
-                None => feed::load(&ws),
+                None => feed::for_display(&ws),
             };
             self.start_run(ws, Some(backend), message, None, Vec::new());
             return;
@@ -150,7 +150,7 @@ impl CraftApp {
         if attached {
             // The project already has a conversation: keep it, and append the request. The run
             // records the request in the feed when it starts; the app only reads the feed.
-            self.state.feed = feed::load(&ws);
+            self.state.feed = feed::for_display(&ws);
             self.state.feed.push(FeedItem::User(UserItem::Text(request.clone())));
         } else {
             self.state.feed = vec![FeedItem::User(UserItem::Text(request.clone()))];
@@ -225,7 +225,7 @@ impl CraftApp {
             self.preview = None;
             self.state.feed = match self.runs.get_mut(&ws.root).filter(|r| r.is_running()) {
                 Some(run) => run.feed_now(),
-                None => feed::load(&ws),
+                None => feed::for_display(&ws),
             };
             self.load_asked(&ws);
         }
@@ -282,19 +282,25 @@ impl CraftApp {
     pub fn answer_request(&mut self, id: &str, answer: Answer, shown: String) {
         let r = match (self.open_run(), &self.workspace) {
             (Some(run), _) => run.answer_as(id, &answer, &shown),
-            (None, Some(ws)) => {
-                // The question, taken before it's answered: whoever asked may remove it right after.
-                let inbox = Inbox::new(ws.inbox_dir());
-                let question = inbox.pending().into_iter().find(|r| r.id == id);
-                inbox.answer(id, &answer).and_then(|()| question.map_or(Ok(()), |q| feed::record_answer(ws, &q, &shown)))
-            }
+            (None, Some(ws)) => Inbox::new(ws.inbox_dir()).answer_recorded(ws, id, &answer, &shown),
             _ => return,
         };
         if let Err(e) = r {
-            self.toast(e.message, true);
+            self.toast(e.for_people(), true);
             return;
         }
-        feed::answered(&mut self.state.feed, id, &shown);
+        let current = match (self.open_run(), &self.workspace) {
+            (Some(run), _) => run.display_feed(),
+            (None, Some(ws)) => feed::for_display(ws),
+            _ => Vec::new(),
+        };
+        if let Some(updated) = current.into_iter().find(|item| matches!(item, FeedItem::Ask { request, .. } if request.id == id))
+            && let Some(card) = self.state.feed.iter_mut().find(|item| matches!(item, FeedItem::Ask { request, .. } if request.id == id))
+        {
+            // The display may have added an undelivered-reply hint to the old request.
+            // Replace that card only; pending events still need their usual polling effects.
+            *card = updated;
+        }
         self.state.answers.remove(id);
         if !self.state.feed.iter().any(|f| matches!(f, FeedItem::Ask { answer: None, .. }))
             && let Some(ws) = &self.workspace
@@ -315,7 +321,15 @@ impl CraftApp {
         let mut finished = Vec::new();
         for (root, e) in &events {
             if open.as_ref() == Some(root) {
-                apply(&mut self.state.feed, e);
+                if matches!(e, RunEvent::Finished { .. })
+                    && let Some(run) = self.runs.get(root)
+                {
+                    // Finished.message serves text clients. This display keeps the build's
+                    // result and its separate final persistence notice, including recovery.
+                    self.state.feed = run.display_feed();
+                } else {
+                    apply(&mut self.state.feed, e);
+                }
                 if matches!(e, RunEvent::Agent(AgentEvent::ToolFinished { .. } | AgentEvent::TurnDone { .. })) {
                     self.view_dirty = true;
                 }
@@ -2597,6 +2611,59 @@ mod tests {
         assert_eq!(app.projects[0].root, ws.root);
     }
 
+    #[test]
+    fn a_project_answer_stays_pending_after_a_failed_feed_save() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = Workspace::create(d.path(), "x", "A game", TargetRef::None).unwrap();
+        let inbox = Inbox::new(ws.inbox_dir());
+        let id = inbox.post(RequestKind::Question, "Blue?", "", vec![], true, None).unwrap();
+        let path = ws.root.join(feed::FEED_FILE);
+        std::fs::create_dir(&path).unwrap();
+        let mut app = crate::demo::app(crate::demo::engine(craft_anything_engine::Mode::Beginner, true));
+        app.open_workspace(ws.clone());
+        let answer = Answer { choice: Some("Blue".into()), ..Default::default() };
+        app.state.answers.insert(id.clone(), "Blue".into());
+        app.answer_request(&id, answer.clone(), "Blue".into());
+        assert_eq!(inbox.pending().len(), 1);
+        assert!(!inbox.dir().join(format!("{id}.answer.json")).exists());
+        assert!(app.state.feed.iter().any(|item| matches!(item, FeedItem::Ask { request, answer: None } if request.id == id)));
+        assert_eq!(app.state.answers.get(&id).map(String::as_str), Some("Blue"));
+        assert!(app.state.toasts.iter().any(|(text, error)| *error && text.contains("Make it readable, then reopen the project")), "{:?}", app.state.toasts);
+        std::fs::remove_dir(&path).unwrap();
+        app.answer_request(&id, answer, "Blue".into());
+        assert!(inbox.pending().is_empty());
+        assert!(!app.state.answers.contains_key(&id));
+        assert!(app.state.feed.iter().any(|item| matches!(item, FeedItem::Ask { request, answer: Some(answer) } if request.id == id && answer == "Blue")));
+        assert!(feed::load(&ws).iter().any(|item| matches!(item, FeedItem::Ask { request, answer: Some(answer) } if request.id == id && answer == "Blue")));
+    }
+
+    #[test]
+    fn a_project_answer_stays_pending_after_delivery_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let ws = Workspace::create(directory.path(), "Colour", "Pick a colour", TargetRef::None).unwrap();
+        let inbox = Inbox::new(ws.inbox_dir());
+        let id = inbox.post(RequestKind::Question, "Blue or red?", "", vec![], true, None).unwrap();
+        let mut app = crate::demo::app(crate::demo::engine(craft_anything_engine::Mode::Beginner, true));
+        app.open_workspace(ws.clone());
+        app.state.answers.insert(id.clone(), "Blue".into());
+        let answer_path = inbox.dir().join(format!("{id}.answer.json"));
+        std::fs::create_dir(&answer_path).unwrap();
+        app.answer_request(&id, Answer { text: Some("Blue".into()), ..Default::default() }, "Blue".into());
+        assert!(app.state.toasts.iter().any(|(_, error)| *error));
+        assert_eq!(app.state.answers.get(&id).map(String::as_str), Some("Blue"));
+        assert_eq!(inbox.pending().len(), 1, "a directory is not a delivered answer");
+        assert!(feed::load(&ws).iter().any(|item| matches!(item, FeedItem::Ask { request, answer: Some(answer) } if request.id == id && answer == "Blue")));
+        assert!(feed::for_display(&ws).iter().any(|item| matches!(item, FeedItem::Ask { request, answer: None } if request.id == id)));
+        assert!(app.state.feed.iter().any(|item| matches!(item, FeedItem::Ask { request, answer: None } if request.id == id)));
+        std::fs::remove_dir(&answer_path).unwrap();
+        app.answer_request(&id, Answer { text: Some("Red".into()), ..Default::default() }, "Red".into());
+        assert!(!app.state.answers.contains_key(&id));
+        assert_eq!(inbox.wait(&id, std::time::Duration::ZERO, &|| false).unwrap().as_text(), "Red");
+        assert!(
+            feed::for_display(&ws).iter().any(|item| matches!(item, FeedItem::Ask { request, answer: Some(answer) } if request.id == id && answer == "Red"))
+        );
+    }
+
     /// An attached folder keeps its saved settings, and its typed request starts the run as a
     /// follow-up instead of being dropped.
     #[test]
@@ -2612,7 +2679,10 @@ mod tests {
         .unwrap();
         ws.manifest.stack = "Godot".into();
         ws.save().unwrap();
-        craft_anything_ai::rebuild::feed::save(&ws.root, &[FeedItem::User(UserItem::Text("earlier message".into()))]).unwrap();
+        let mut initial_feed = feed::load(&ws);
+        initial_feed.clear();
+        initial_feed.push(FeedItem::User(UserItem::Text("earlier message".into())));
+        feed::save(&ws.root, &mut initial_feed).unwrap();
         let mut app = crate::demo::app(crate::demo::engine(craft_anything_engine::Mode::Beginner, true));
         let local = BackendConfig {
             name: "Local".into(),

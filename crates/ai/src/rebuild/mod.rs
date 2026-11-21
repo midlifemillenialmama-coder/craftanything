@@ -452,7 +452,13 @@ impl RebuildRun {
     pub fn feed_now(&mut self) -> Vec<feed::FeedItem> {
         let feed = self.feed.lock().unwrap_or_else(PoisonError::into_inner);
         while self.rx.try_recv().is_ok() {}
-        feed.items().to_vec()
+        feed.display_items(&self.inbox)
+    }
+
+    /// Read the current display without consuming queued workflow events. A final save notice
+    /// remains separate from whether the build succeeded, paused, or failed.
+    pub fn display_feed(&self) -> Vec<feed::FeedItem> {
+        self.feed.lock().unwrap_or_else(PoisonError::into_inner).display_items(&self.inbox)
     }
 
     /// Answer a question or approval card.
@@ -462,9 +468,9 @@ impl RebuildRun {
 
     /// Answer a card; `shown` is how the answer appears in the project's feed.
     pub fn answer_as(&self, id: &str, answer: &Answer, shown: &str) -> Result<(), ToolError> {
-        self.inbox.answer(id, answer)?;
-        self.feed.lock().unwrap_or_else(PoisonError::into_inner).answered(id, shown);
-        Ok(())
+        let mut feed = self.feed.lock().unwrap_or_else(PoisonError::into_inner);
+        let prepare = feed.prepare_answer();
+        self.inbox.answer_with_guard(id, answer, prepare, |guard, request| feed.answered(guard, request, shown, || Ok(())))
     }
 
     pub fn stop(&self) {
@@ -572,7 +578,7 @@ const USAGE_FLUSH: Duration = Duration::from_secs(60);
 fn emit_event(feed: &Mutex<feed::FeedLog>, tx: &Sender<RunEvent>, wake: &Wake, e: RunEvent) {
     let mut feed = feed.lock().unwrap_or_else(PoisonError::into_inner);
     feed.record(&e);
-    let _ = tx.send(e);
+    let _ = tx.send(feed.completion_event(e));
     drop(feed);
     wake.call();
 }

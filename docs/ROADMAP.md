@@ -121,6 +121,11 @@ cheapest help we can give anyone, so nothing below should hold it up for long.
       #195. #113, #329 and #377 are 0.2.0's missing CLI, fixed by `1b54cbf`, not what #490 reports.
       Not yet: #64 (its cause is fixed, its retries aren't: R5.3), #142 (R5.3), and #462, which says
       `none`, not #490's failure, and gives no version: ask for it
+- [x] Disable `StartupNotify` in the `.desktop` file so GNOME Wayland no longer kills the app
+      after 5–8 s (#1929). The trade-off is that GNOME shows no "starting" feedback while the app
+      opens.
+- [ ] Investigate why the app does not consume or clear the `XDG_ACTIVATION_TOKEN` that GNOME
+      passes when `StartupNotify=true`, and re-enable launch feedback once fixed (#1929).
 - [ ] Sometimes starting the app shows nothing: after the release, see from `desktop.log` whether it
       still happens. DX12-only may have ended it; a GOG Galaxy Vulkan overlay layer was seen loading
       into the app

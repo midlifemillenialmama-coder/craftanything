@@ -357,6 +357,7 @@ impl CraftApp {
             let join = |part: fn(&Note) -> &str| left.iter().map(part).collect::<Vec<_>>().join("\n\n");
             let (message, shown) = (join(|n| &n.text), join(|n| &n.shown));
             let pictures: Vec<PathBuf> = left.iter().flat_map(|n| n.pictures.clone()).collect();
+            let carried_notes = left.iter().map(rebuild::notes::Carried::from).collect();
             if open.as_ref() == Some(&root) {
                 if let Some(ws) = self.workspace.as_mut() {
                     let _ = ws.reload();
@@ -366,13 +367,13 @@ impl CraftApp {
                         self.state.feed.pop();
                     }
                     self.state.feed.push(FeedItem::User(UserItem::new(shown.clone(), pictures.clone())));
-                    self.resume(Some(message), Some(shown), pictures);
+                    self.resume_with_notes(Some(message), Some(shown), pictures, carried_notes);
                 }
             } else if !left.is_empty() {
                 // Another project's notes start its next run in the background.
                 let Ok(ws) = Workspace::open(&root) else { continue };
                 let Some(backend) = self.builder_backend(ws.manifest.builder.as_deref()) else { continue };
-                let opts = self.run_options(Some(backend), Some(message), Some(shown), pictures);
+                let opts = RunOptions { carried_notes, ..self.run_options(Some(backend), Some(message), Some(shown), pictures) };
                 if let Err(e) = self.launch(ws, opts) {
                     self.toast(e.message, true);
                 }
@@ -2226,10 +2227,15 @@ impl CraftApp {
     /// Start another run on the open project: with a message (already shown in the app's feed;
     /// `shown` puts it in the saved one, with `pictures`), or none to try again.
     fn resume(&mut self, message: Option<String>, shown: Option<String>, pictures: Vec<PathBuf>) {
+        self.resume_with_notes(message, shown, pictures, Vec::new());
+    }
+
+    fn resume_with_notes(&mut self, message: Option<String>, shown: Option<String>, pictures: Vec<PathBuf>, carried_notes: Vec<rebuild::notes::Carried>) {
         let Some(ws) = self.workspace.clone() else { return };
         let ws = Workspace::open(&ws.root).unwrap_or(ws);
         let Some(backend) = self.builder_backend(ws.manifest.builder.as_deref()) else { return self.need_builder(false) };
-        self.start_run(ws, Some(backend), message, shown, pictures);
+        let opts = RunOptions { carried_notes, ..self.run_options(Some(backend), message, shown, pictures) };
+        self.start_run_with(ws, opts);
     }
 }
 
@@ -2237,6 +2243,45 @@ impl CraftApp {
 mod tests {
     use super::*;
     use craft_anything_ai::AgentEvent;
+
+    #[test]
+    fn automatically_forwarded_notes_keep_their_saved_identities() {
+        use craft_anything_ai::{AiConfig, BackendConfig, BackendEntry, BackendKind};
+        use craft_anything_platform::sync::Mutex;
+        use std::sync::Arc;
+        for opened in [true, false] {
+            let d = tempfile::tempdir().unwrap();
+            let ws = Workspace::create(d.path(), "Notes", "A notes app", TargetRef::None).unwrap();
+            let engine = Arc::new(craft_anything_engine::Engine::new(craft_anything_engine::testing::session()));
+            let mut app = crate::demo::app(engine);
+            let backend =
+                BackendConfig { name: "Agent".into(), kind: BackendKind::AgentCli, model: "claude-code".into(), base_url: None, ssh_host: None, enabled: true };
+            app.backends = vec![backend.clone()];
+            let mut cfg = AiConfig::default();
+            cfg.upsert(BackendEntry { config: backend, options: Default::default() });
+            app.hub.save_config(&cfg).unwrap();
+            let fake = rebuild::StandIns::new();
+            let mut start = fake.starter();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let requests = seen.clone();
+            app.runs = rebuild::RunSet::new(1).with_starter(Box::new(move |hub, ws, opts| {
+                requests.lock().unwrap().push((opts.message.clone(), opts.carried_notes.clone()));
+                start(hub, ws, opts)
+            }));
+            if opened {
+                app.open_workspace(ws.clone());
+            }
+            app.runs.start(&app.hub, ws.clone(), RunOptions::default()).unwrap();
+            let left = rebuild::notes::Left { text: "Make the header blue".into(), shown: "Use this blue".into(), pictures: vec![ws.root.join("blue.png")] };
+            let id = app.runs.get(&ws.root).unwrap().add_note(left.text.clone(), left.shown.clone(), left.pictures.clone());
+            fake.finish(&ws.root);
+            app.poll_run();
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 2, "the waiting note starts a follow-up");
+            assert_eq!(seen[1].0.as_deref(), Some(left.text.as_str()));
+            assert_eq!(seen[1].1, [rebuild::notes::Carried { id, note: left }]);
+        }
+    }
 
     #[test]
     fn the_app_starts_with_the_persons_settings_while_the_engine_is_busy() {

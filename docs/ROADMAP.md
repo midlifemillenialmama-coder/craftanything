@@ -2078,8 +2078,11 @@ Gaps found while using the app for real projects.
       keeps its live feed when it is already building, and keeps a queued request with its options;
       a start that fails keeps the Make draft
       — claimed: AlexJoaquimPereira, branch bugfix/r2.9-attached-builder-feed
-- [ ] A queued run's request lives in its `RunOptions` and the in-memory queue; an app exit before
-      it starts loses it. Let the run side keep it (a queue record or a left note) across a restart
+- [x] A queued run's request is kept in `inbox/queued-request.json` before the queue accepts it.
+      Its words, shown message and picture paths survive a pause, app exit or failed start; the
+      next manual Continue or Try again restores them with the current builder and mode. The
+      waiting project offers Continue after reopening; unreadable or newer records stay unchanged
+      — claimed: Afloat16, branch bugfix/r2.9-persist-queued-request
 - [x] A config.toml that is there but can't be read (another program holds it, no permission, not
       UTF-8) loaded as defaults like a missing one, and the next save replaced it; one that couldn't
       be parsed was renamed aside with the rename's result ignored. Only "not found" is plain

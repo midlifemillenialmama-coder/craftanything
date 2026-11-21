@@ -32,6 +32,58 @@ pub fn text_field_frame_compact(t: &Tokens) -> Frame {
     text_field_frame(t).inner_margin(theme::pad::FIELD_COMPACT)
 }
 
+/// The label size of the standard control (buttons, switches, drop-downs, chips), in the
+/// [`label_galley`] style, so a row of mixed controls reads as one size.
+pub const CONTROL_TEXT: f32 = theme::ControlSize::Medium.text();
+
+/// How tall the standard control is drawn: buttons, switches, drop-downs and the chips beside them.
+pub fn control_height() -> f32 {
+    theme::ControlSize::Medium.height()
+}
+
+/// A wrapping row of labels and controls that is a control tall from its first item, so a label
+/// placed before a drop-down or button is centred on it rather than on egui's shorter default row.
+pub fn control_row<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
+    let h = control_height();
+    row_from(ui, h, true, add)
+}
+
+/// [`control_row`] on one line, for a row that never wraps.
+pub fn control_line<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
+    let h = control_height();
+    row_from(ui, h, false, add)
+}
+
+/// A row that is `height` tall from its first item: everything in it centres on its tallest
+/// control (a big Start button), not on egui's shorter default row.
+pub fn tall_row<R>(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
+    row_from(ui, height, false, add)
+}
+
+fn row_from<R>(ui: &mut Ui, height: f32, wrap: bool, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
+    let saved = ui.spacing().interact_size.y;
+    ui.spacing_mut().interact_size.y = height;
+    let inner = |ui: &mut Ui| {
+        ui.spacing_mut().interact_size.y = saved;
+        add(ui)
+    };
+    let r = if wrap { ui.horizontal_wrapped(inner) } else { ui.horizontal(inner) };
+    ui.spacing_mut().interact_size.y = saved;
+    r
+}
+
+/// A one-line text field drawn like the controls beside it: [`control_height`] tall, its text and
+/// its hint in the control size, centred. Chain `.desired_width`, `.password` and the rest on as usual.
+pub fn field<'t>(ui: &Ui, text: &'t mut dyn egui::TextBuffer, hint: &str) -> egui::TextEdit<'t> {
+    let font = egui::FontId::proportional(CONTROL_TEXT);
+    egui::TextEdit::singleline(text)
+        .font(font.clone())
+        .hint_text(RichText::new(tr(hint)).font(font))
+        .vertical_align(egui::Align::Center)
+        .min_size(Vec2::new(0.0, control_height() - 2.0))
+        .frame(text_field_frame_compact(&Tokens::get(ui.ctx())))
+}
+
 /// A switch with a label, in place of a checkbox. Flips `on` when clicked.
 pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     let t = Tokens::get(ui.ctx());
@@ -65,6 +117,33 @@ pub fn dropdown(id_salt: impl egui::AsIdSalt) -> egui::ComboBox {
     egui::ComboBox::from_id_salt(id_salt).icon(combo_icon).popup_style(egui::style::StyleModifier::from(|s: &mut egui::Style| {
         s.spacing.item_spacing.y = theme::space::XXS;
     }))
+}
+
+/// A drop-down drawn like the buttons beside it: [`control_height`] tall, its text in the control
+/// font, centred, with the chevron. Every combo box goes through here.
+pub fn combo<R>(ui: &mut Ui, combo: egui::ComboBox, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<Option<R>> {
+    let h = control_height();
+    let line = label_galley(ui, "Ag", CONTROL_TEXT, Color32::PLACEHOLDER).size().y;
+    // egui's combo box measures from the top of its slot, and in a centred layout it then lands a
+    // padding lower. So it gets a slot of exactly its height, centred in a row that is taller.
+    let slot = ui.available_rect_before_wrap();
+    let layout = ui.layout();
+    let top = if layout.is_horizontal() && layout.vertical_align() == egui::Align::Center && slot.height() > h {
+        slot.top() + ((slot.height() - h) / 2.0).round()
+    } else {
+        slot.top()
+    };
+    let rect = egui::Rect::from_min_max(egui::pos2(slot.left(), top), egui::pos2(slot.right(), top + h));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Min)), |ui| {
+        ui.style_mut().text_styles.insert(egui::TextStyle::Button, theme::medium(CONTROL_TEXT));
+        // egui grows a short combo box downward only, so the padding does the centring.
+        ui.spacing_mut().button_padding.y = ((h - line) / 2.0).max(0.0);
+        // A caption-sized override around it (a card's fine print) would shrink its text.
+        ui.style_mut().override_text_style = None;
+        ui.style_mut().override_font_id = None;
+        combo.icon(combo_icon).show_ui(ui, add)
+    })
+    .inner
 }
 
 /// How long a dropdown's list takes to fade in.
@@ -173,7 +252,7 @@ pub fn suggestion(ui: &mut Ui, text: &str) -> Response {
     let max_w = ui.available_width().max(60.0);
     let g = ui.painter().layout(tr(text), egui::FontId::proportional(theme::SMALL), t.text, max_w - 26.0);
     let w = if ui.layout().horizontal_justify() { max_w } else { (g.size().x + 26.0).min(max_w) };
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, (g.size().y + 14.0).max(32.0)), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, (g.size().y + 14.0).max(control_height())), Sense::click());
     let h = hover_t(ui, &resp);
     ui.painter().rect(
         rect,
@@ -191,30 +270,106 @@ pub fn suggestion(ui: &mut Ui, text: &str) -> Response {
 
 /// A big, radio-like choice with an icon and plain words (and an optional line under them,
 /// empty for none); the chosen one is in the app colour with a tick (so it doesn't rely on
-/// colour alone). It grows taller when the words need it.
+/// colour alone). It grows taller when the words need it. Tiles that sit beside each other go
+/// through [`choice_tiles`], which keeps them the same height.
 pub fn choice_tile(ui: &mut Ui, size: Vec2, icon: &str, label: &str, blurb: &str, on: bool) -> Response {
+    let tile = Tile { icon, label, blurb, on };
+    let (title_h, text_h) = tile_text_size(ui, &tile, size.x - TILE_TEXT_INSET);
+    paint_tile(ui, Vec2::new(size.x, size.y.max(text_h + 24.0)), &tile, title_h, text_h)
+}
+
+/// One choice in a row of [`choice_tiles`].
+pub struct Tile<'a> {
+    pub icon: &'a str,
+    pub label: &'a str,
+    /// The line under the title; empty for none.
+    pub blurb: &'a str,
+    pub on: bool,
+}
+
+/// What a tile's words leave of its width: the icon on the left and the tick on the right.
+const TILE_TEXT_INSET: f32 = 84.0;
+/// The space between tiles, across and down.
+const TILE_GAP: f32 = 10.0;
+
+/// Sibling choice tiles as one grid: as many columns as fit (at most `max_cols`, and only counts
+/// that fill every row) with every title on one line in the current language, and every tile as
+/// tall as the tallest, so their titles and the lines under them start at the same height.
+/// `min_h` is the shortest a tile may be. Returns the index of the tile clicked.
+pub fn choice_tiles(ui: &mut Ui, tiles: &[Tile], max_cols: usize, min_h: f32) -> Option<usize> {
+    let cols = tile_columns(ui, tiles, max_cols, ui.available_width());
+    let tile_w = tile_width(ui.available_width(), cols);
+    let wrap = tile_w - TILE_TEXT_INSET;
+    let (mut title_h, mut blurb_h) = (0.0_f32, None::<f32>);
+    for tile in tiles {
+        let (title, text) = tile_text_size(ui, tile, wrap);
+        title_h = title_h.max(title);
+        if !tile.blurb.is_empty() {
+            blurb_h = Some(blurb_h.unwrap_or(0.0).max(text - title - 3.0));
+        }
+    }
+    let text_h = title_h + blurb_h.map_or(0.0, |b| b + 3.0);
+    let size = Vec2::new(tile_w, min_h.max(text_h + 24.0));
+    let mut clicked = None;
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(TILE_GAP);
+        for (row, chunk) in tiles.chunks(cols.max(1)).enumerate() {
+            ui.horizontal(|ui| {
+                for (i, tile) in chunk.iter().enumerate() {
+                    if paint_tile(ui, size, tile, title_h, text_h).clicked() {
+                        clicked = Some(row * cols + i);
+                    }
+                }
+            });
+        }
+    });
+    clicked
+}
+
+/// How many columns [`choice_tiles`] uses in `width`: the most (up to `max_cols`) that fill every
+/// row and keep every title on one line; one column when none does.
+pub fn tile_columns(ui: &Ui, tiles: &[Tile], max_cols: usize, width: f32) -> usize {
     let t = Tokens::get(ui.ctx());
-    let wrap = size.x - 84.0;
-    let g = ui.painter().layout(tr(label), theme::medium(theme::BODY), t.text, wrap);
-    let sub = (!blurb.is_empty()).then(|| ui.painter().layout(tr(blurb), egui::FontId::proportional(theme::SMALL), t.text_dim, wrap));
-    let text_h = g.size().y + sub.as_ref().map_or(0.0, |s| s.size().y + 3.0);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(size.x, size.y.max(text_h + 24.0)), Sense::click());
+    let widest = tiles.iter().map(|x| ui.painter().layout_no_wrap(tr(x.label), theme::medium(theme::BODY), t.text).size().x).fold(0.0_f32, f32::max);
+    (2..=max_cols.min(tiles.len())).rev().find(|&c| tiles.len().is_multiple_of(c) && widest <= tile_width(width, c) - TILE_TEXT_INSET).unwrap_or(1)
+}
+
+fn tile_width(width: f32, cols: usize) -> f32 {
+    ((width - TILE_GAP * (cols as f32 - 1.0)) / cols.max(1) as f32).floor()
+}
+
+/// The title's height and the whole text's (title, then the blurb 3 points under it) at `wrap`.
+fn tile_text_size(ui: &Ui, tile: &Tile, wrap: f32) -> (f32, f32) {
+    let t = Tokens::get(ui.ctx());
+    let title = ui.painter().layout(tr(tile.label), theme::medium(theme::BODY), t.text, wrap).size().y;
+    let blurb =
+        (!tile.blurb.is_empty()).then(|| ui.painter().layout(tr(tile.blurb), egui::FontId::proportional(theme::SMALL), t.text_dim, wrap).size().y + 3.0);
+    (title, title + blurb.unwrap_or(0.0))
+}
+
+/// One tile at `size`, its text block `text_h` tall and centred, the blurb starting `title_h`
+/// under the title's top (the tallest title in its row, so blurbs line up across the row).
+fn paint_tile(ui: &mut Ui, size: Vec2, tile: &Tile, title_h: f32, text_h: f32) -> Response {
+    let t = Tokens::get(ui.ctx());
+    let wrap = size.x - TILE_TEXT_INSET;
+    let g = ui.painter().layout(tr(tile.label), theme::medium(theme::BODY), t.text, wrap);
+    let sub = (!tile.blurb.is_empty()).then(|| ui.painter().layout(tr(tile.blurb), egui::FontId::proportional(theme::SMALL), t.text_dim, wrap));
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let h = hover_t(ui, &resp);
-    let (fill, stroke) = if on {
+    let (fill, stroke) = if tile.on {
         (t.accent_soft, Stroke::new(2.0, t.accent))
     } else {
         (theme::mix(t.field, t.hover, h), Stroke::new(1.0, theme::mix(t.card_border, t.field_border, h)))
     };
     ui.painter().rect(rect, t.radius, fill, stroke, egui::StrokeKind::Inside);
     let icon_rect = egui::Rect::from_center_size(egui::pos2(rect.left() + 28.0, rect.center().y), Vec2::splat(24.0));
-    icons::paint(ui, icon_rect, icon, theme::icon::XL, if on { t.accent_ink } else { t.icon });
+    icons::paint(ui, icon_rect, tile.icon, theme::icon::XL, if tile.on { t.accent_ink } else { t.icon });
     let top = egui::pos2(icon_rect.right() + 12.0, rect.center().y - text_h / 2.0);
-    let title_h = g.size().y;
     ui.painter().galley(top, g, t.text);
     if let Some(s) = sub {
         ui.painter().galley(top + Vec2::new(0.0, title_h + 3.0), s, t.text_dim);
     }
-    if on {
+    if tile.on {
         icons::paint(
             ui,
             egui::Rect::from_center_size(egui::pos2(rect.right() - 20.0, rect.center().y), Vec2::splat(18.0)),
@@ -224,7 +379,8 @@ pub fn choice_tile(ui: &mut Ui, size: Vec2, icon: &str, label: &str, blurb: &str
         );
     }
     focus_ring(ui, &resp, rect);
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, resp.enabled(), on, tr(label)));
+    let (on, label) = (tile.on, tr(tile.label));
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, resp.enabled(), on, label.clone()));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -403,8 +559,18 @@ pub fn danger(ui: &mut Ui, icon: Option<&str>, label: &str) -> Response {
 
 /// A borderless text button in the accent colour.
 pub fn link(ui: &mut Ui, label: &str) -> Response {
+    link_text(ui, RichText::new(tr(label)))
+}
+
+/// [`link`] at the size of the text beside it, so a link closing a line reads as part of it.
+pub fn link_sized(ui: &mut Ui, label: &str, size: f32) -> Response {
+    link_text(ui, RichText::new(tr(label)).size(size))
+}
+
+/// [`link`] with its text styled by the caller (an id in the mono font), and not translated.
+pub fn link_text(ui: &mut Ui, text: RichText) -> Response {
     let t = Tokens::get(ui.ctx());
-    let r = ui.add(egui::Label::new(RichText::new(tr(label)).color(t.accent_ink)).sense(Sense::click()));
+    let r = ui.add(egui::Label::new(text.color(t.accent_ink)).sense(Sense::click()));
     let r = r.on_hover_cursor(egui::CursorIcon::PointingHand);
     if r.hovered() {
         let y = r.rect.bottom();
@@ -505,6 +671,21 @@ pub fn pill_sized(ui: &mut Ui, text: &str, fg: Color32, bg: Color32, text_size: 
     ui.painter().rect_filled(rect, rect.height() / 2.0, bg);
     ui.painter().galley_with_override_text_color(rect.center() - g.size() / 2.0, g, fg);
     // Painted text: say it to screen readers too.
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
+    resp
+}
+
+/// A status label as tall as a [`secondary`] button, with the same padding and corners, so it sits
+/// level with the buttons beside it in a row. [`pill`] stays the small one for running text.
+pub fn status_chip(ui: &mut Ui, text: &str, fg: Color32, bg: Color32) -> Response {
+    let t = Tokens::get(ui.ctx());
+    let label = tr(text);
+    let g = label_galley(ui, &label, CONTROL_TEXT, fg);
+    let pad = ui.spacing().button_padding;
+    let size = Vec2::new(g.size().x + pad.x * 2.0 + 6.0, control_height());
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+    ui.painter().rect_filled(rect, t.radius, bg);
+    ui.painter().galley_with_override_text_color(rect.center() - g.size() / 2.0, g, fg);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
     resp
 }
@@ -924,7 +1105,9 @@ mod tests {
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "rs") && path.file_name().is_some_and(|n| n != "widgets.rs") {
                 let text = std::fs::read_to_string(&path).unwrap();
-                if text.lines().any(|l| !l.trim_start().starts_with("//") && (l.contains("egui::Spinner") || l.contains("egui::ProgressBar"))) {
+                // `ui.spinner()` is egui's own spinner too, by another name.
+                let egui_own = |l: &str| l.contains("egui::Spinner") || l.contains(".spinner()") || l.contains("egui::ProgressBar");
+                if text.lines().any(|l| !l.trim_start().starts_with("//") && egui_own(l)) {
                     used.push(path.file_name().unwrap().to_string_lossy().into_owned());
                 }
             }

@@ -425,7 +425,8 @@ impl CraftApp {
 
     /// Let the builder generate pictures and 3D models, or not: for the open project on its screen
     /// (through the project_assets_allow tool), else for the game being set up on Make. Turning it
-    /// on without a fal.ai key asks for one.
+    /// on without a fal.ai key asks for one; with ComfyUI as the picture model it opens Settings →
+    /// Builds instead, when its address or checkpoint is missing.
     pub fn set_generate_assets(&mut self, on: bool) {
         let project = self.workspace.as_ref().filter(|_| self.state.screen == Screen::Project).map(|w| w.root.clone());
         match project {
@@ -435,7 +436,13 @@ impl CraftApp {
             }
             None => self.state.make.generate_assets = on,
         }
-        if on && self.fal_key() == Some(false) {
+        let assets = &self.settings.assets;
+        if on && assets.comfyui_chosen() {
+            if !assets.comfyui_ready() {
+                self.state.settings_open = true;
+                self.state.settings_tab = crate::state::SettingsTab::Builds;
+            }
+        } else if on && self.fal_key() == Some(false) {
             self.state.modal = Some(Modal::Assets);
         }
     }
@@ -443,17 +450,10 @@ impl CraftApp {
 
 /// A provider's key field and its Save button; returns the key when Save is pressed.
 fn key_field(app: &mut CraftApp, ui: &mut Ui, provider: &dyn AssetProvider, save: &str) -> Option<String> {
-    let t = Tokens::get(ui.ctx());
     let mut out = None;
     ui.horizontal(|ui| {
         let key = app.key_inputs.entry(provider.id().into()).or_default();
-        let r = ui.add(
-            egui::TextEdit::singleline(key)
-                .password(true)
-                .hint_text(trf("Paste your {name} key", &[("name", provider.name())]))
-                .desired_width(320.0)
-                .frame(widgets::text_field_frame_compact(&t)),
-        );
+        let r = ui.add(widgets::field(ui, key, &trf("Paste your {name} key", &[("name", provider.name())])).password(true).desired_width(320.0));
         widgets::named(r, &trf("{name} key", &[("name", provider.name())]));
         let k = key.trim().to_string();
         if widgets::primary_icon(ui, None, save, !k.is_empty()).clicked() && !k.is_empty() {
@@ -471,9 +471,15 @@ pub fn assets_toggle(app: &mut CraftApp, ui: &mut Ui, mut on: bool) {
     if widgets::toggle(ui, &mut on, "Generate custom pictures and models").changed() {
         app.set_generate_assets(on);
     }
-    let no_key = on && app.fal_key() == Some(false);
-    let note = if no_key {
+    let (comfy, chosen) = (app.settings.assets.comfyui_ready(), app.settings.assets.comfyui_chosen());
+    let no_key = on && app.fal_key() == Some(false) && !chosen;
+    let unready = on && chosen && !comfy;
+    let note = if unready {
+        tr("Needs a ComfyUI address and checkpoint in Settings → Builds. Until then the game is built without them.")
+    } else if no_key {
         tr("Needs a fal.ai key. Until then the game is built without them.")
+    } else if comfy {
+        tr("No key needed; pictures are made on your server.")
     } else {
         let p = AssetPrices::of(app);
         trf(
@@ -481,7 +487,7 @@ pub fn assets_toggle(app: &mut CraftApp, ui: &mut Ui, mut on: bool) {
             &[("model", &p.model), ("picture", &p.picture)],
         )
     };
-    let ink = if no_key { t.warning } else { t.text_faint };
+    let ink = if no_key || unready { t.warning } else { t.text_faint };
     ui.add(egui::Label::new(RichText::new(note).color(ink).size(theme::CAPTION).line_height(Some(theme::leading(theme::CAPTION)))).wrap());
     if no_key && widgets::link(ui, "Add a fal.ai key").clicked() {
         app.state.modal = Some(Modal::Assets);
@@ -555,7 +561,7 @@ impl AssetPrices {
 /// "Get a key at …" for a provider that says where.
 fn keys_link(ui: &mut Ui, provider: &dyn AssetProvider) {
     if let Some(page) = provider.keys_page()
-        && widgets::link(ui, &trf("Get a key at {name}", &[("name", provider.name())])).clicked()
+        && widgets::link_sized(ui, &trf("Get a key at {name}", &[("name", provider.name())]), theme::SMALL).clicked()
     {
         ui.ctx().open_url(egui::OpenUrl::new_tab(page));
     }
@@ -636,7 +642,7 @@ pub fn build_with(app: &mut CraftApp, ui: &mut Ui) {
         }
         ui.add_space(theme::space::SM);
     }
-    ui.horizontal(|ui| {
+    widgets::control_line(ui, |ui| {
         ui.label(RichText::new(tr("Build with")).size(theme::BODY).color(t.text_dim));
         let names: Vec<&str> = Builder::ALL.iter().map(|b| b.name()).collect();
         // Nothing is selected while the request names another way to build.

@@ -281,17 +281,21 @@ pub fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// The medium and semibold families: Figtree's own weight first, then a script's bold face from
-/// craft-fonts where it has one, then the whole proportional stack. Without the bold fallback a
-/// heading in Japanese or Chinese fell back to that script's regular face, so it looked lighter
-/// than the Latin beside it (#1808).
+/// The medium and semibold families: Figtree's own weight first, then the app's own faces, then a
+/// script's bold face from craft-fonts where it has one, then the craft-fonts regular faces.
+/// Without the bold fallback a heading in Japanese or Chinese fell back to that script's regular
+/// face, so it looked lighter than the Latin beside it (#1808). The app's own faces go before the
+/// bold ones because the Japanese and Chinese faces also carry Cyrillic and Greek, at full width:
+/// ahead of egui's own face, a Russian label came out half as wide again.
 fn weighted_families(base: &[String], bold: &[String]) -> Vec<(FontFamily, Vec<String>)> {
+    let (craft, own): (Vec<&String>, Vec<&String>) = base.iter().partition(|n| n.starts_with("craft:"));
     [("medium", "Figtree-Medium"), ("semibold", "Figtree-SemiBold")]
         .into_iter()
         .map(|(fam, primary)| {
             let mut stack = vec![primary.to_owned()];
+            stack.extend(own.iter().map(|n| (*n).clone()));
             stack.extend(bold.iter().cloned());
-            stack.extend(base.iter().cloned());
+            stack.extend(craft.iter().map(|n| (*n).clone()));
             (FontFamily::Name(fam.into()), stack)
         })
         .collect()
@@ -927,17 +931,19 @@ mod tests {
     /// Japanese or Chinese headings aren't lighter than the Latin beside them.
     #[test]
     fn a_heading_takes_a_scripts_bold_face_before_its_regular_one() {
-        let base = vec!["Figtree".to_string(), "craft:japanese:regular".to_string()];
+        let base = vec!["Figtree".to_string(), "Ubuntu-Light".to_string(), "craft:japanese:regular".to_string()];
         let bold = vec!["craft:japanese:bold".to_string()];
         let families = weighted_families(&base, &bold);
         let stack = |name: &str| {
             families.iter().find(|(f, _)| f == &FontFamily::Name(name.into())).map(|(_, s)| s.clone()).unwrap_or_else(|| panic!("{name} is installed"))
         };
-        assert_eq!(stack("semibold"), ["Figtree-SemiBold", "craft:japanese:bold", "Figtree", "craft:japanese:regular"]);
-        assert_eq!(stack("medium"), ["Figtree-Medium", "craft:japanese:bold", "Figtree", "craft:japanese:regular"]);
+        // egui's own face (Cyrillic, Greek) stays ahead of the Japanese bold, which has full-width
+        // Cyrillic of its own.
+        assert_eq!(stack("semibold"), ["Figtree-SemiBold", "Figtree", "Ubuntu-Light", "craft:japanese:bold", "craft:japanese:regular"]);
+        assert_eq!(stack("medium"), ["Figtree-Medium", "Figtree", "Ubuntu-Light", "craft:japanese:bold", "craft:japanese:regular"]);
         // Without a bold face the stack is what it always was.
         let regular_only = weighted_families(&base, &[]);
-        assert_eq!(regular_only[1].1, ["Figtree-SemiBold", "Figtree", "craft:japanese:regular"]);
+        assert_eq!(regular_only[1].1, ["Figtree-SemiBold", "Figtree", "Ubuntu-Light", "craft:japanese:regular"]);
     }
 
     #[test]

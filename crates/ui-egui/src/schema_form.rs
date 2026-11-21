@@ -175,12 +175,7 @@ pub fn show(ui: &mut Ui, fields: &[Field], values: &mut BTreeMap<String, String>
                             FieldKind::Number => "number",
                             _ => "",
                         };
-                        ui.add(
-                            egui::TextEdit::singleline(v)
-                                .desired_width(320.0)
-                                .hint_text(tr(hint))
-                                .frame(widgets::text_field_frame_compact(&Tokens::get(ui.ctx()))),
-                        );
+                        ui.add(widgets::field(ui, v, hint).desired_width(320.0));
                     }
                 }
                 if !f.description.is_empty() {

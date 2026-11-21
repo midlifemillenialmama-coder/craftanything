@@ -128,3 +128,6 @@ panic = "abort"
 # Remove this once the upstream wgpu release picks a Metal version the compiler accepts. See vendor/wgpu-hal/CRAFT_ANYTHING.md.
 [patch.crates-io]
 wgpu-hal = { path = "vendor/wgpu-hal" }
+# egui-wgpu that filters textures by hand on WARP, which samples them about ten times slower than it loads them.
+# See vendor/egui-wgpu/CRAFT_ANYTHING.md.
+egui-wgpu = { path = "vendor/egui-wgpu" }

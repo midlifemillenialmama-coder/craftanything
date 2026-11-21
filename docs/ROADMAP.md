@@ -2152,7 +2152,7 @@ Gaps found while using the app for real projects.
       than the first sign-in's cookies
 - [ ] Before the builder starts on a signed-in study, show the person the study's first
       screenshots and ask them to confirm it's the signed-in app (Make screen and an inbox approval)
-- [ ] After a website build, list what plain files can't carry over (forms, sign-ins, payments,
+- [x] After a website build, list what plain files can't carry over (forms, sign-ins, payments,
       bookings), read from the capture: Clean room keeps links and form outlines. Copied form
       markup isn't a working form, and a capture with no form or sign-in link doesn't show the
       site has none, so keep "seen, not carried over" apart from "not seen". Say which
@@ -2160,6 +2160,9 @@ Gaps found while using the app for real projects.
       addresses, sizes and alt text, and the builder uses placeholders for photos and logos
       unless the person confirms they own them; fetching or publishing each one is a separate
       yes
+      — claimed: rmsff, branch feature/r2.9-carry-over — PR #2243
+- [ ] The carry-over list is only in the feed after a ready website build: show it in the
+      project's summary too, and offer to fetch a picture the person confirms they own
 - [x] A Rust build starts on a computer without Cargo and spends a whole builder turn before
       its build check says cargo is missing (#1837): a new build whose stack names a program
       (`program` in stacks.toml) stops before any turn when it isn't found, saying how to get

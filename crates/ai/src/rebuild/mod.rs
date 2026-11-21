@@ -1122,6 +1122,11 @@ impl Worker {
         }
         ws.set_status(Status::Ready, summary.clone())?;
         self.emit(RunEvent::Step { step: Step::Done, text: summary.clone() });
+        if matches!(ws.manifest.target, TargetRef::Website { .. })
+            && let Some(list) = kinds::carry_over::carry_over(&kinds::carry_over::pages(ws))
+        {
+            self.emit(RunEvent::Step { step: Step::Done, text: list });
+        }
         Ok(summary)
     }
 

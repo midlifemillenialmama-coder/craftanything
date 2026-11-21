@@ -4,6 +4,7 @@
 //! trait and calling [`KindRegistry::register`].
 
 mod app;
+pub mod carry_over;
 mod game;
 pub mod mechanics;
 pub mod own;

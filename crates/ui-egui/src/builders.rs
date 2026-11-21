@@ -1,3 +1,5 @@
+// Modifications (c) 2026 SuperSfera LLC, MIT OR Apache-2.0.
+
 //! Who builds: the AIs that can build, the one that builds by default, the choice on Make
 //! ("Built by"), and the dialog when nothing can build yet. One rule decides "can it build?"
 //! ([`craft_anything_ai::default_builder`]), so the Make screen's warning and Start agree.
@@ -127,12 +129,27 @@ impl CraftApp {
     /// What builds when the person doesn't choose: the default from Settings → AI, else an agent
     /// app found on this computer.
     pub fn default_builder(&self) -> Option<String> {
+        // With local_first on, only a local server or the fallback chain builds: an agent app that
+        // is merely set up or found is not offered implicitly (the same rule the build itself uses).
+        if let Some(local) = &self.local_builders {
+            return local.first().cloned();
+        }
         craft_anything_ai::default_builder(&self.backends, self.builder.as_deref()).or_else(|| self.found_agents().next()).map(|b| b.name.clone())
     }
 
     /// Something can build.
     pub fn can_build(&self) -> bool {
         self.default_builder().is_some()
+    }
+
+    /// What a build is given. `None` means nothing can build. `Some(None)` means the person didn't
+    /// choose and `local_first` is on: the build picks the first server that answers, instead of
+    /// being pinned to the name [`Self::default_builder`] shows. Any other automatic choice, and
+    /// every choice the person made, is `Some(Some(name))`.
+    pub fn build_with(&mut self, wanted: Option<&str>) -> Option<Option<String>> {
+        let explicit = wanted.map(str::trim).filter(|name| !name.is_empty());
+        let resolved = self.builder_backend(explicit)?;
+        if explicit.is_none() && self.local_builders.is_some() { Some(None) } else { Some(Some(resolved)) }
     }
 
     /// The AI to build with: `wanted` while it can build, else the default. An agent app that was
@@ -498,4 +515,42 @@ pub fn need_builder_modal(app: &mut CraftApp, ui: &mut Ui, start: bool, close: &
             }
         });
     });
+}
+
+#[cfg(test)]
+mod local_first_tests {
+    use crate::demo;
+    use craft_anything_ai::{BackendConfig, BackendKind};
+
+    fn backend(name: &str, kind: BackendKind, model: &str, base_url: Option<&str>) -> BackendConfig {
+        BackendConfig { name: name.into(), kind, model: model.into(), base_url: base_url.map(str::to_string), ssh_host: None, enabled: true }
+    }
+
+    #[test]
+    fn the_build_hint_names_the_local_server_not_an_agent_app_when_local_first_is_on() {
+        let mut app = demo::app(demo::engine(craft_anything_engine::Mode::Experienced, true));
+        app.hub.add_backend(backend("Claude Code", BackendKind::AgentCli, "claude-code", None), None).unwrap();
+        app.hub.add_backend(backend("Lemonade", BackendKind::OpenaiCompatible, "qwen", Some("http://127.0.0.1:13305/v1")), None).unwrap();
+        app.backends = app.hub.backends();
+        app.local_builders = crate::local_builders(&app.hub.config());
+        assert_eq!(app.default_builder().as_deref(), Some("Claude Code"), "upstream rule while local_first is off");
+        assert_eq!(app.build_with(None), Some(Some("Claude Code".into())));
+
+        let mut cfg = app.hub.config();
+        cfg.local_first = true;
+        cfg.fallback_chain = vec!["Claude Code".into()];
+        app.hub.save_config(&cfg).unwrap();
+        app.local_builders = crate::local_builders(&app.hub.config());
+        assert_eq!(app.default_builder().as_deref(), Some("Lemonade"));
+        assert_eq!(app.build_with(None), Some(None), "nothing chosen: the build selects a server that answers");
+        assert_eq!(app.build_with(Some("Claude Code")), Some(Some("Claude Code".into())));
+        assert_eq!(app.default_builder().as_deref(), Some("Lemonade"), "the hint still names the default");
+        assert!(app.can_build());
+
+        cfg.backends.retain(|b| b.config.name != "Lemonade");
+        cfg.fallback_chain.clear();
+        app.hub.save_config(&cfg).unwrap();
+        app.local_builders = crate::local_builders(&app.hub.config());
+        assert_eq!(app.default_builder(), None, "no local server and nothing named: nothing builds implicitly");
+    }
 }

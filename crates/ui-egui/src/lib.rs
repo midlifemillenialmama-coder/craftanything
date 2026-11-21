@@ -1,3 +1,5 @@
+// Modifications (c) 2026 SuperSfera LLC, MIT OR Apache-2.0.
+
 //! The Craft Anything egui interface: Simple mode (make something from a prompt, or ask about a
 //! target) and Advanced mode (the full workbench). Both drive the same engine.
 //!
@@ -273,7 +275,7 @@ pub enum Done {
     Created {
         ws: Box<craft_anything_engine::workspace::Workspace>,
         request: String,
-        backend: String,
+        backend: Option<String>,
         /// Why the pictures couldn't be copied, if they couldn't.
         pictures: Option<String>,
         /// The folder already held a project: the request is its follow-up, not a new project's.
@@ -493,6 +495,9 @@ pub struct CraftApp {
     pub folder_inputs: std::collections::BTreeMap<String, String>,
     /// The backend the person chose to build with (Settings → AI), if any.
     pub builder: Option<String>,
+    /// slava/local: with `[ai] local_first` on, the builders to try in order (the Builder role or
+    /// the first local server, then the fallback chain); `None` while it's off.
+    pub local_builders: Option<Vec<String>>,
     /// The backend chosen to take a game's files out in Deep mode, if any.
     pub extractor: Option<String>,
     pub detected: Option<Vec<Detected>>,
@@ -646,6 +651,7 @@ impl CraftApp {
             picking_program_for: None,
             folder_inputs: Default::default(),
             builder: None,
+            local_builders: None,
             extractor: None,
             detected: None,
             detect_hints: Vec::new(),
@@ -1699,6 +1705,7 @@ impl CraftApp {
                 }
                 self.backends = b;
                 self.builder = builder;
+                self.local_builders = local_builders(&self.hub.config());
                 self.extractor = extractor;
                 self.backend_options = options;
                 self.program_replaced = replaced;
@@ -2410,6 +2417,11 @@ impl Drop for CraftApp {
     fn drop(&mut self) {
         self.updates.finish();
     }
+}
+
+/// slava/local: the builders `[ai] local_first` would try, in order; `None` while it's off.
+pub fn local_builders(cfg: &craft_anything_ai::AiConfig) -> Option<Vec<String>> {
+    cfg.local_first.then(|| cfg.builder_candidates().into_iter().map(|b| b.config.name.clone()).collect())
 }
 
 #[cfg(test)]

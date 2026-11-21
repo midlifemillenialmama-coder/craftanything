@@ -1,3 +1,5 @@
+// Modifications (c) 2026 SuperSfera LLC, MIT OR Apache-2.0.
+
 //! The rebuild workflow: study a target, have a coding agent build it in the workspace's `app/`
 //! folder, check the build against the target, and refine — asking the person when needed.
 //!
@@ -1652,6 +1654,15 @@ pub fn builder_backend(cfg: &crate::AiConfig, named: Option<&str>) -> Result<cra
                 .with_remediation("Turn it on in Settings → AI, or choose another backend for this build."));
         }
         return Ok(entry.clone());
+    }
+    if cfg.local_first {
+        // slava/local: the first builder that can start now, then the fallback chain (Grok Build…).
+        let candidates = cfg.builder_candidates();
+        return candidates.iter().find(|b| crate::backend_reachable(b)).or_else(|| candidates.first()).map(|b| (*b).clone()).ok_or_else(|| {
+            ToolError::new(ErrorCode::BadSettings, "local_first is on and no local AI server is set up to build with.").with_remediation(
+                "Start Lemonade or LM Studio and run `craft-anything-cli ai use-local`, or name a builder in [ai.roles] or [ai] fallback_chain.",
+            )
+        });
     }
     cfg.backend_for(Role::Builder)
         .or_else(|| cfg.enabled().find(|b| b.config.kind == BackendKind::AgentCli))

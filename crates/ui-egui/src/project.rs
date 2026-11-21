@@ -67,7 +67,7 @@ impl CraftApp {
         if self.signing_in.is_some() {
             return self.toast(tr("Finish signing in to the site first."), true);
         }
-        let Some(backend) = self.builder_backend(draft.ai.as_deref()) else { return self.need_builder(true) };
+        let Some(backend) = self.build_with(draft.ai.as_deref()) else { return self.need_builder(true) };
         // Make's pictures are still being checked: start once they are in.
         if self.pending_make_checks > 0 {
             // Retain this draft. Editing Make while the checks run cancels the deferred Start (the
@@ -120,7 +120,7 @@ impl CraftApp {
     }
 
     /// A project from [`Self::start_make`] was made: its build starts.
-    pub(crate) fn created(&mut self, ws: Workspace, request: String, backend: String, pictures: Option<String>, attached: bool) {
+    pub(crate) fn created(&mut self, ws: Workspace, request: String, backend: Option<String>, pictures: Option<String>, attached: bool) {
         if let Some(e) = pictures {
             self.toast(format!("{} {}", tr("Couldn't add the pictures:"), e), true);
         }
@@ -137,12 +137,12 @@ impl CraftApp {
                 Some(run) => run.feed_now(),
                 None => feed::load(&ws),
             };
-            self.start_run(ws, Some(backend), message, None, Vec::new());
+            self.start_run(ws, backend, message, None, Vec::new());
             return;
         }
         // An attached project uses the builder it saved; a new one uses the one Make was started with.
         let backend = if attached {
-            let Some(saved) = self.builder_backend(ws.manifest.builder.as_deref()) else { return self.need_builder(false) };
+            let Some(saved) = self.build_with(ws.manifest.builder.as_deref()) else { return self.need_builder(false) };
             saved
         } else {
             backend
@@ -155,7 +155,7 @@ impl CraftApp {
         } else {
             self.state.feed = vec![FeedItem::User(UserItem::Text(request.clone()))];
         }
-        self.start_run(ws, Some(backend), message.clone(), message, Vec::new());
+        self.start_run(ws, backend, message.clone(), message, Vec::new());
         // Keep an edited draft; clear it only once this request is running or queued.
         if self.state.make.request.trim() == request && (self.runs.is_running(&root) || self.runs.position(&root).is_some()) {
             self.state.make = MakeDraft::default();
@@ -261,9 +261,9 @@ impl CraftApp {
             return;
         }
         let Some(ws) = self.workspace.clone() else { return };
-        let Some(backend) = self.builder_backend(ws.manifest.builder.as_deref()) else { return self.need_builder(false) };
+        let Some(backend) = self.build_with(ws.manifest.builder.as_deref()) else { return self.need_builder(false) };
         let ws = Workspace::open(&ws.root).unwrap_or(ws);
-        let opts = RunOptions { continuing: true, ..self.run_options(Some(backend), None, None, Vec::new()) };
+        let opts = RunOptions { continuing: true, ..self.run_options(backend, None, None, Vec::new()) };
         self.start_run_with(ws, opts);
     }
 
@@ -371,8 +371,8 @@ impl CraftApp {
             } else if !left.is_empty() {
                 // Another project's notes start its next run in the background.
                 let Ok(ws) = Workspace::open(&root) else { continue };
-                let Some(backend) = self.builder_backend(ws.manifest.builder.as_deref()) else { continue };
-                let opts = self.run_options(Some(backend), Some(message), Some(shown), pictures);
+                let Some(backend) = self.build_with(ws.manifest.builder.as_deref()) else { continue };
+                let opts = self.run_options(backend, Some(message), Some(shown), pictures);
                 if let Err(e) = self.launch(ws, opts) {
                     self.toast(e.message, true);
                 }
@@ -2228,8 +2228,8 @@ impl CraftApp {
     fn resume(&mut self, message: Option<String>, shown: Option<String>, pictures: Vec<PathBuf>) {
         let Some(ws) = self.workspace.clone() else { return };
         let ws = Workspace::open(&ws.root).unwrap_or(ws);
-        let Some(backend) = self.builder_backend(ws.manifest.builder.as_deref()) else { return self.need_builder(false) };
-        self.start_run(ws, Some(backend), message, shown, pictures);
+        let Some(backend) = self.build_with(ws.manifest.builder.as_deref()) else { return self.need_builder(false) };
+        self.start_run(ws, backend, message, shown, pictures);
     }
 }
 
@@ -2580,7 +2580,7 @@ mod tests {
         let ws = Workspace::create(d.path(), "Notes", "A notes app", TargetRef::None).unwrap();
         let mut app = crate::demo::app(crate::demo::engine(craft_anything_engine::Mode::Beginner, true));
         assert!(app.projects.is_empty());
-        app.created(ws.clone(), "A notes app".into(), "test-backend".into(), None, false);
+        app.created(ws.clone(), "A notes app".into(), Some("test-backend".into()), None, false);
         assert!(!app.projects.is_empty(), "project is added to app.projects immediately");
         assert_eq!(app.projects[0].root, ws.root);
     }
@@ -2628,7 +2628,7 @@ mod tests {
         cfg.upsert(BackendEntry { config: local, options: Default::default() });
         app.hub.save_config(&cfg).unwrap();
         // "Off" isn't a backend: the attached project must use the builder it saved instead.
-        app.created(ws.clone(), "add a jump".into(), "Off".into(), None, true);
+        app.created(ws.clone(), "add a jump".into(), Some("Off".into()), None, true);
         assert!(app.state.feed.iter().any(|i| matches!(i, FeedItem::User(u) if u.text() == "earlier message")), "the saved feed is kept: {:?}", app.state.feed);
         assert!(app.state.feed.iter().any(|i| matches!(i, FeedItem::User(u) if u.text() == "add a jump")), "the new request is appended: {:?}", app.state.feed);
         let saved_feed = craft_anything_ai::rebuild::feed::load(&ws);

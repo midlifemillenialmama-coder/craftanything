@@ -145,8 +145,8 @@ fn desktop_app_error(app: &Path) -> ToolError {
 }
 
 /// Where an agent's program is on this computer: the first match on the search path that is
-/// really it. Detection, the desktop app hint and starting a run all look through this, so what's
-/// offered is what runs.
+/// really it. The desktop app hint and starting a run look through this, and detection through
+/// [`find_program_scan`], which answers the same, so what's offered is what runs.
 pub fn find_program(program: &str) -> Option<PathBuf> {
     find_program_in(program, craft_anything_platform::which::search_path()).or_else(|| local_desktop_cli(program))
 }
@@ -200,7 +200,18 @@ fn desktop_cli(program: &str, local_data: Option<&Path>) -> Option<PathBuf> {
 }
 
 fn find_program_in(program: &str, path: Option<std::ffi::OsString>) -> Option<PathBuf> {
-    craft_anything_platform::which::which_in(program, path).into_iter().find(|p| program != "claude" || !leads_to_claude_desktop(p))
+    first_not_desktop_app(program, craft_anything_platform::which::which_in(program, path))
+}
+
+/// [`find_program`] for a scan of several programs: `lookup` lists each folder of the search path once
+/// for all of them. It gives the same answer, with the same desktop-app filter and fallback.
+pub(crate) fn find_program_scan(program: &str, lookup: &mut craft_anything_platform::which::Lookup) -> Option<PathBuf> {
+    first_not_desktop_app(program, craft_anything_platform::which::which_in_scan(program, lookup)).or_else(|| local_desktop_cli(program))
+}
+
+/// The first of `found` that really is `program`: not the Claude desktop app, when it is `claude`.
+fn first_not_desktop_app(program: &str, found: Vec<PathBuf>) -> Option<PathBuf> {
+    found.into_iter().find(|p| program != "claude" || !leads_to_claude_desktop(p))
 }
 
 /// [`is_claude_desktop`] for the file itself or, when it's a link, the file it leads to.
@@ -3814,5 +3825,30 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
         }
         assert!(all.iter().any(|e| matches!(e, AgentEvent::Error { message, .. } if message.contains("Clean room"))), "{all:?}");
         assert!(!dir.path().join("runs").exists(), "Aider must not start in a Clean room run");
+    }
+
+    /// The scan for several programs answers as one lookup does: the Claude desktop app is passed
+    /// over, and with only the app on the path there is no Claude Code. Other names asked on the same
+    /// `Lookup` don't disturb it.
+    #[test]
+    fn a_scan_passes_over_the_claude_desktop_app_as_a_single_lookup_does() {
+        use craft_anything_platform::which::Lookup;
+        let d = tempfile::tempdir().unwrap();
+        let file = if cfg!(windows) { "claude.exe" } else { "claude" };
+        let (app, cli) = (d.path().join("AnthropicClaude").join(file), d.path().join("bin").join(file));
+        for p in [&app, &cli] {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"").unwrap();
+            #[cfg(unix)]
+            std::fs::set_permissions(p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+        let (app_dir, cli_dir) = (app.parent().unwrap(), cli.parent().unwrap());
+        for dirs in [vec![app_dir, cli_dir], vec![cli_dir, app_dir], vec![app_dir]] {
+            let path = std::env::join_paths(&dirs).ok();
+            let mut lookup = Lookup::new(path.clone());
+            assert_eq!(find_program_scan("claude", &mut lookup), find_program_in("claude", path), "{dirs:?}");
+        }
+        let mut lookup = Lookup::new(std::env::join_paths([app_dir, cli_dir]).ok());
+        assert_eq!(find_program_scan("claude", &mut lookup), Some(cli));
     }
 }

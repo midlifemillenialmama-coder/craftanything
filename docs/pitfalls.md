@@ -518,6 +518,18 @@ so it was never disassembled, nothing referred to the next table and the bound t
 entries. When a fix leans on what an analysis found, ask whether the thing being fixed is why it
 found nothing, and run it on a real program, not only on one built for the test.
 
+**A deadline that dropped a whole result.** `detect_all` waited 1.5 s for its parts and left out any part
+that was late. The agent search made one check per `PATH` folder, name and file ending for each of 14
+programs, about 15,000 in all. A failed check cost 100-200 µs on the system drive of one Windows PC (likely its real-time
+antivirus and file-system filter drivers) and 26 µs on another with a similar `PATH`: the scan took 1.2-2.6 s on
+the first and 0.35 s on the second, so Claude Code and Copilot were not offered on the first and nothing said why
+(a user name with spaces was blamed first, wrongly). A limit that holds while the work grows with the person's
+machine fails for the people with the most set up. When a part has a deadline, find what its work grows with (here
+the length of `PATH` and the cost of one file check) and cut that work, not raise the limit; tell the person when a
+part was left out; and test with a long `PATH`, not a short one. A folder listing used to skip checks may only rule
+a file out, never decide a match, and every case it can't speak for (an unreadable folder, a non-ASCII name, a
+folder over its limit) goes back to the check. Not run on macOS or Linux.
+
 **A bridge that didn't compile.** A helper in the Ghidra bridge was named like a public
 `GhidraScript` method, so Ghidra refused the script and the run only said the bridge stopped.
 Compile the `.java` against Ghidra's jars (`javac -proc:none -cp <Ghidra/**/lib/*.jar>`) before a

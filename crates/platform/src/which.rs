@@ -1,5 +1,6 @@
 //! Find programs on `PATH` (with `PATHEXT` on Windows). No subprocess is run.
 
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -248,6 +249,22 @@ fn with_usual_dirs(path: Option<OsString>, home: Option<PathBuf>, local_data: Op
 
 /// Like [`which_all`] with an explicit search path.
 pub fn which_in(name: &str, path: Option<OsString>) -> Vec<PathBuf> {
+    find_in(name, path, None)
+}
+
+/// [`which_in`] for a scan of many names over one search path. `lookup` lists each folder once, and a
+/// file that its folder's listing doesn't show is not checked. Every file that is shown is checked the
+/// way [`which_in`] checks it, so the answer is the same. One scan, one `Lookup`: it keeps what it
+/// listed, so a file made after its folder was listed isn't seen by that `Lookup`.
+pub fn which_in_scan(name: &str, lookup: &mut Lookup) -> Vec<PathBuf> {
+    let path = lookup.path.clone();
+    find_in(name, path, Some(&mut lookup.index))
+}
+
+/// The one lookup behind [`which_in`] and [`which_in_scan`] (so their rules can't drift apart).
+/// `index` may only rule a candidate out; whether a file is a match is still decided by
+/// `is_executable`.
+fn find_in(name: &str, path: Option<OsString>, mut index: Option<&mut DirIndex>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if name.is_empty() {
         return out;
@@ -268,6 +285,11 @@ pub fn which_in(name: &str, path: Option<OsString>) -> Vec<PathBuf> {
             continue;
         }
         for c in candidates(&dir.join(name)) {
+            if let Some(i) = index.as_deref_mut()
+                && i.rules_out(&dir, &c)
+            {
+                continue;
+            }
             if is_executable(&c) && !out.contains(&c) {
                 out.push(c);
                 break;
@@ -275,6 +297,130 @@ pub fn which_in(name: &str, path: Option<OsString>) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// The most entries read from one folder when it is listed for a [`Lookup`]. It counts reads, not
+/// time. `system32` on Windows holds about 4,800.
+const DIR_INDEX_MAX_ENTRIES: usize = 50_000;
+
+/// What a folder holds, as far as a lookup can use it to skip a check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Listing {
+    /// Every name in the folder, ASCII lower-cased.
+    Names(HashSet<String>),
+    /// There is no such folder, so no file is in it.
+    Missing,
+    /// Can't say, so each candidate is checked: the folder couldn't be listed, an entry in it couldn't
+    /// be read, it holds more than [`DIR_INDEX_MAX_ENTRIES`], or a name in it isn't ASCII (some disks
+    /// fold such letters to ASCII ones, so a file could match a name its listing doesn't show: APFS
+    /// reads U+017F as `s` and the Kelvin sign as `k`).
+    Unknown,
+}
+
+impl Listing {
+    /// A listing from the names `entries` yields. It reads at most `cap` entries and one more, which
+    /// says that there are more, so a huge folder is never read to its end.
+    fn from_entries(entries: impl IntoIterator<Item = std::io::Result<OsString>>, cap: usize) -> Self {
+        let mut names = HashSet::new();
+        let mut read = 0usize;
+        for entry in entries {
+            if read >= cap {
+                return Self::Unknown;
+            }
+            read = read.saturating_add(1);
+            let Ok(name) = entry else { return Self::Unknown };
+            let Some(name) = name.to_str().filter(|n| n.is_ascii()) else { return Self::Unknown };
+            names.insert(name.to_ascii_lowercase());
+        }
+        Self::Names(names)
+    }
+
+    fn of_folder(dir: &Path, cap: usize) -> Self {
+        match std::fs::read_dir(dir) {
+            Ok(entries) => Self::from_entries(entries.map(|e| e.map(|e| e.file_name())), cap),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::Missing,
+            Err(_) => Self::Unknown,
+        }
+    }
+}
+
+/// The folders of one search path, listed the first time a lookup needs them.
+#[derive(Debug)]
+struct DirIndex {
+    cap: usize,
+    listed: HashMap<PathBuf, Listing>,
+    /// How many folders were listed (what a test counts, to see the work not grow with the names).
+    #[cfg(test)]
+    lists: usize,
+}
+
+impl DirIndex {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            listed: HashMap::new(),
+            #[cfg(test)]
+            lists: 0,
+        }
+    }
+
+    fn listing(&mut self, dir: &Path) -> &Listing {
+        let cap = self.cap;
+        #[cfg(test)]
+        let lists = &mut self.lists;
+        self.listed.entry(dir.to_path_buf()).or_insert_with(|| {
+            #[cfg(test)]
+            {
+                *lists += 1;
+            }
+            Listing::of_folder(dir, cap)
+        })
+    }
+
+    /// True when `candidate` can't be a file in `dir`: its folder is missing, or lists no file of
+    /// that name. False whenever that isn't certain (a name that isn't plain ASCII, a folder that
+    /// couldn't be listed), and the file is then checked.
+    fn rules_out(&mut self, dir: &Path, candidate: &Path) -> bool {
+        let Some(name) = candidate.file_name().and_then(|n| n.to_str()).filter(|n| listable_name(n)) else { return false };
+        match self.listing(dir) {
+            Listing::Missing => true,
+            Listing::Names(names) => !names.contains(&name.to_ascii_lowercase()),
+            Listing::Unknown => false,
+        }
+    }
+}
+
+/// A file name the listing can speak for: letters, digits, `-`, `_` and `.` only (so plain ASCII, no
+/// space), and no trailing dot (Windows drops trailing dots and spaces when it opens a path, so such a
+/// name isn't the one that would be found).
+fn listable_name(name: &str) -> bool {
+    !name.is_empty() && !name.ends_with('.') && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// A search path and what its folders hold, for [`which_in_scan`]. Make one per scan.
+#[derive(Debug)]
+pub struct Lookup {
+    path: Option<OsString>,
+    index: DirIndex,
+}
+
+impl Lookup {
+    /// A lookup over `path` (as [`which_in`] takes it), with no folder listed yet.
+    pub fn new(path: Option<OsString>) -> Self {
+        Self { path, index: DirIndex::new(DIR_INDEX_MAX_ENTRIES) }
+    }
+
+    /// What `dir` held when it was first needed (listing it now if it wasn't).
+    #[cfg(test)]
+    fn listing(&mut self, dir: &Path) -> &Listing {
+        self.index.listing(dir)
+    }
+
+    /// How many folders this lookup has listed.
+    #[cfg(test)]
+    fn lists(&self) -> usize {
+        self.index.lists
+    }
 }
 
 /// File name of the command-line binary (`craft-anything-cli`, plus `.exe` on Windows).
@@ -811,5 +957,147 @@ mod tests {
         assert!(which_in("tool", Some(dir.path().as_os_str().to_owned())).is_empty());
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(which_in("tool", Some(dir.path().as_os_str().to_owned())), vec![p]);
+    }
+
+    /// A program file in `dir` that `which_in` accepts on this system (an execute bit on Unix).
+    fn program(dir: &Path, file: &str) -> PathBuf {
+        let p = dir.join(file);
+        std::fs::write(&p, "x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    fn joined(dirs: &[&Path]) -> Option<OsString> {
+        std::env::join_paths(dirs).ok()
+    }
+
+    /// Every file of `name` that `which_in` finds, `which_in_scan` finds too, and the same ones in
+    /// the same order, for names that are there and names that aren't, on one `Lookup` (so a bug
+    /// in what it keeps between names shows).
+    fn assert_same(path: Option<OsString>, names: &[&str]) {
+        let mut lookup = Lookup::new(path.clone());
+        for name in names {
+            assert_eq!(which_in_scan(name, &mut lookup), which_in(name, path.clone()), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_listing_reads_at_most_its_limit_and_one_more() {
+        let reads = std::cell::Cell::new(0usize);
+        let many = std::iter::repeat_with(|| {
+            reads.set(reads.get() + 1);
+            Ok(OsString::from("f"))
+        });
+        assert_eq!(Listing::from_entries(many, 5), Listing::Unknown);
+        assert_eq!(reads.get(), 6, "five, and the one that says there are more");
+        // Exactly the limit is a whole listing.
+        let five = (0..5).map(|i| Ok(OsString::from(format!("f{i}"))));
+        assert!(matches!(Listing::from_entries(five, 5), Listing::Names(n) if n.len() == 5));
+    }
+
+    #[test]
+    fn a_scan_finds_what_which_in_finds() {
+        let (a, b, c) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let exe = std::env::consts::EXE_SUFFIX;
+        // The name in two folders, the same name in another case in a third (each case in a folder of its
+        // own: some disks ignore case), a similar name, a file that is not executable (the index must not
+        // decide that; on Unix it is not a match) and a folder with a space in its path.
+        program(a.path(), &format!("tool{exe}"));
+        program(b.path(), &format!("tool{exe}"));
+        program(c.path(), &format!("Tool{exe}"));
+        program(a.path(), &format!("tool2{exe}"));
+        std::fs::write(a.path().join(format!("noexec{exe}")), "x").unwrap();
+        let spaced = c.path().join("a folder");
+        std::fs::create_dir(&spaced).unwrap();
+        program(&spaced, &format!("tool{exe}"));
+        let missing = a.path().join("nothing here");
+        let names = ["tool", "Tool", "TOOL", "tool2", "noexec", "absent", "tool.", "my tool", ""];
+        let dirs = [a.path(), b.path(), c.path(), &spaced, &missing];
+        assert_same(joined(&dirs), &names);
+        let reversed: Vec<&Path> = dirs.iter().rev().copied().collect();
+        assert_same(joined(&reversed), &names);
+        assert_same(None, &names);
+        assert_same(joined(&[Path::new("")]), &names);
+    }
+
+    /// A listing and a candidate match in any letter case: a disk that ignores case can hold `Tool.CMD`
+    /// where PATHEXT asks for `tool.cmd`. This runs on every system (the Windows test does not run on CI).
+    #[test]
+    fn a_listing_and_a_candidate_match_in_any_letter_case() {
+        let dir = Path::new("d");
+        let mut index = DirIndex::new(10);
+        index.listed.insert(dir.to_path_buf(), Listing::from_entries([Ok(OsString::from("Tool.CMD"))], 10));
+        assert!(!index.rules_out(dir, &dir.join("tool.cmd")), "listed in capitals, asked in lower case");
+        assert!(!index.rules_out(dir, &dir.join("TOOL.cmd")), "asked in capitals");
+        assert!(index.rules_out(dir, &dir.join("other.cmd")), "a name that isn't there is ruled out");
+    }
+
+    #[test]
+    fn a_folder_with_a_non_ascii_name_is_still_searched() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = program(dir.path(), &format!("tool{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(dir.path().join("t\u{f6}\u{f6}l.txt"), "x").unwrap();
+        let mut lookup = Lookup::new(joined(&[dir.path()]));
+        assert_eq!(*lookup.listing(dir.path()), Listing::Unknown);
+        assert_eq!(which_in_scan("tool", &mut lookup), vec![p]);
+    }
+
+    #[test]
+    fn a_folder_over_the_limit_is_still_searched() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = std::env::consts::EXE_SUFFIX;
+        let p = program(dir.path(), &format!("tool{exe}"));
+        for i in 0..3 {
+            std::fs::write(dir.path().join(format!("other{i}")), "x").unwrap();
+        }
+        let mut lookup = Lookup { path: joined(&[dir.path()]), index: DirIndex::new(2) };
+        assert_eq!(which_in_scan("tool", &mut lookup), vec![p]);
+        assert_eq!(*lookup.listing(dir.path()), Listing::Unknown);
+    }
+
+    /// The regression: the work of a scan grows with the folders, not with the names asked for. One
+    /// folder among many holds the program; each folder is listed once for all fourteen names.
+    #[test]
+    fn a_scan_lists_each_folder_once_however_many_names_it_asks_for() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = std::env::consts::EXE_SUFFIX;
+        let names: Vec<String> = (0..14).map(|i| format!("agent{i}")).collect();
+        for folders in [10usize, 80] {
+            let dirs: Vec<PathBuf> = (0..folders).map(|i| root.path().join(format!("d{folders}-{i}"))).collect();
+            for d in &dirs {
+                std::fs::create_dir(d).unwrap();
+            }
+            let last = dirs.last().unwrap().clone();
+            let p = program(&last, &format!("agent0{exe}"));
+            let refs: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
+            let mut lookup = Lookup::new(joined(&refs));
+            let found: Vec<Vec<PathBuf>> = names.iter().map(|n| which_in_scan(n, &mut lookup)).collect();
+            assert_eq!(found[0], vec![p], "the program in the last of {folders} folders");
+            assert!(found[1..].iter().all(Vec::is_empty));
+            assert_eq!(lookup.lists(), folders, "one listing per folder, not per name");
+        }
+    }
+
+    /// A `.cmd` shim comes before the extensionless script beside it, and `.exe` before `.cmd`, with
+    /// or without a listing.
+    #[cfg(windows)]
+    #[test]
+    fn a_scan_keeps_the_order_windows_would_start_things_in() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tool"), "#!/bin/sh\n").unwrap();
+        std::fs::write(dir.path().join("Tool.CMD"), "@echo off\n").unwrap();
+        std::fs::write(dir.path().join("both.cmd"), "@echo off\n").unwrap();
+        std::fs::write(dir.path().join("both.exe"), "x").unwrap();
+        let mut lookup = Lookup::new(joined(&[dir.path()]));
+        let found = which_in_scan("tool", &mut lookup);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("tool.cmd")), "{found:?}");
+        let both = which_in_scan("both", &mut lookup);
+        assert!(both[0].extension().is_some_and(|e| e.eq_ignore_ascii_case("exe")), "{both:?}");
+        assert_same(joined(&[dir.path()]), &["tool", "TOOL", "both"]);
     }
 }

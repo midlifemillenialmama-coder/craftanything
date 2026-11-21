@@ -153,12 +153,13 @@ pub fn probe_local(label: &str, base: &str) -> Option<Detected> {
     Some(Detected { suggestion: c, reason, needs_key: false })
 }
 
-/// Agent CLIs on PATH.
+/// Agent CLIs on PATH, found with one listing of each folder for all of them.
 pub fn agent_clis() -> Vec<Detected> {
+    let mut lookup = craft_anything_platform::which::Lookup::new(craft_anything_platform::which::search_path());
     crate::cli_agents::KNOWN
         .iter()
         .filter_map(|(id, prog, display)| {
-            crate::cli_agents::find_program(prog).map(|p| Detected {
+            crate::cli_agents::find_program_scan(prog, &mut lookup).map(|p| Detected {
                 suggestion: cfg(display, BackendKind::AgentCli, id),
                 reason: format!("Found {display} at {}", p.display()),
                 needs_key: false,

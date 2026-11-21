@@ -3919,3 +3919,44 @@ fn a_workspace_members_build_shows_play_on_the_project_screen() {
     h.run_steps(2);
     h.get_by_label("Pin this build");
 }
+
+/// The Project screen looks where the session's given environment says Cargo builds
+/// (`CARGO_TARGET_DIR` here), not where this test process's environment does.
+#[test]
+fn the_project_screen_looks_where_the_sessions_cargo_environment_says() {
+    use craft_anything_engine::outputs::CargoEnv;
+    use craft_anything_engine::workspace::{TargetRef, Workspace};
+    let d = tempfile::tempdir().unwrap();
+    let ws = Workspace::create(&d.path().join("projects"), "Snake", "A snake game in Rust", TargetRef::None).unwrap();
+    let app = ws.app_dir();
+    std::fs::create_dir_all(app.join("src")).unwrap();
+    std::fs::write(app.join("Cargo.toml"), "[package]\nname = \"snake\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(app.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let shared = d.path().join("shared");
+    let exe = if cfg!(windows) { "snake.exe" } else { "snake" };
+    let program = shared.join("debug").join(exe);
+    std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+    std::fs::write(&program, "x").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let source = std::path::absolute(app.join("src/main.rs")).unwrap();
+    std::fs::write(program.with_extension("d"), format!("{}: {}\n", program.display(), source.display())).unwrap();
+    let opened = |env: CargoEnv| {
+        let (ws, root) = (ws.clone(), ws.root.clone());
+        let mut h = harness(move || {
+            let engine = demo::engine(Mode::Beginner, true);
+            engine.session().cargo_env = Some(env);
+            let mut a = demo::app(engine);
+            a.open_workspace(ws);
+            a
+        });
+        assert!(wait(&mut h, |a| a.facts.root == root), "the project is read");
+        h
+    };
+    assert!(!opened(CargoEnv::default()).state().facts.program, "nothing names the shared folder");
+    let mut h = opened(CargoEnv { target_dir: Some(shared.into()), ..CargoEnv::default() });
+    assert!(wait(&mut h, |a| a.facts.program), "the build the given CARGO_TARGET_DIR holds is found");
+}

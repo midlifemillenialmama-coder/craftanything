@@ -32,16 +32,18 @@ pub fn built_program(app: &Path) -> Option<PathBuf> {
 /// What the environment says about where Cargo builds: `CARGO_TARGET_DIR`,
 /// `CARGO_BUILD_TARGET_DIR` and Cargo's home folder (`CARGO_HOME`, else `~/.cargo`), whose
 /// `config.toml` (or older `config`) applies when no config closer to the project sets
-/// `build.target-dir`. Given separately so a test doesn't depend on the process environment.
+/// `build.target-dir`. Given separately so a test doesn't depend on the process environment:
+/// the default sets nothing, as though none of these were set and Cargo had no home folder.
 #[derive(Debug, Clone, Default)]
-struct CargoEnv {
-    target_dir: Option<std::ffi::OsString>,
-    build_target_dir: Option<std::ffi::OsString>,
-    home: Option<PathBuf>,
+pub struct CargoEnv {
+    pub target_dir: Option<std::ffi::OsString>,
+    pub build_target_dir: Option<std::ffi::OsString>,
+    /// Cargo's home folder, absolute.
+    pub home: Option<PathBuf>,
 }
 
 impl CargoEnv {
-    fn of_process() -> CargoEnv {
+    pub fn of_process() -> CargoEnv {
         let set = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty());
         CargoEnv {
             target_dir: set("CARGO_TARGET_DIR"),
@@ -407,7 +409,12 @@ pub fn absolute_program(program: &Path) -> PathBuf {
 /// project opens in the Godot it was built with, an Electron app in the Electron it installed.
 /// Other toolchains may declare an interpreted/runner launch when no packaged program exists.
 pub fn launch(app: &Path, godot: Option<&Path>) -> Option<(PathBuf, Vec<String>)> {
-    launch_with(app, godot, built_program)
+    launch_in(app, godot, &CargoEnv::of_process())
+}
+
+/// [`launch`] with the environment given.
+pub fn launch_in(app: &Path, godot: Option<&Path>, env: &CargoEnv) -> Option<(PathBuf, Vec<String>)> {
+    launch_with(app, godot, |app| built_program_in(app, env))
 }
 
 /// [`launch`] for a copy of a build (a pin): a Rust program is looked for only in target
@@ -431,7 +438,7 @@ pub fn launch_now(app: &Path, godot: Option<&Path>) -> Option<(PathBuf, Vec<Stri
     launch_with(app, godot, built_program_now)
 }
 
-fn launch_with(app: &Path, godot: Option<&Path>, rust_program: fn(&Path) -> Option<PathBuf>) -> Option<(PathBuf, Vec<String>)> {
+fn launch_with(app: &Path, godot: Option<&Path>, rust_program: impl FnOnce(&Path) -> Option<PathBuf>) -> Option<(PathBuf, Vec<String>)> {
     if app.join("project.godot").is_file() {
         let root = std::path::absolute(app).ok()?;
         return godot_launch(&root, godot?);

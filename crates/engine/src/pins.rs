@@ -17,6 +17,7 @@
 //! in [`Runs`], one at a time per folder unless another is asked for.
 
 use crate::inbox::now_ms;
+use crate::outputs::CargoEnv;
 use crate::versioned;
 use crate::workspace::{self, Workspace};
 use craft_anything_evidence::{ErrorCode, ToolError};
@@ -135,8 +136,9 @@ impl Pin {
         self.dir(ws).join("last-run.log")
     }
 
-    /// Resolve the recorded program within the copy; old pins retain their discovery behavior.
-    pub(crate) fn launch(&self, ws: &Workspace, godot: Option<&Path>) -> Result<(PathBuf, Vec<String>), ToolError> {
+    /// Resolve the recorded program within the copy; old pins retain their discovery behavior. A
+    /// saved Live pin finds the project's build where `cargo` says Cargo puts it.
+    pub(crate) fn launch(&self, ws: &Workspace, godot: Option<&Path>, cargo: &CargoEnv) -> Result<(PathBuf, Vec<String>), ToolError> {
         let app = self.app_dir(ws);
         if self.mode.keeps_copy()
             && let Some(relative) = &self.program
@@ -159,7 +161,7 @@ impl Pin {
         // A pin from before programs were recorded: its own copy decides, not where Cargo builds
         // the project now (a global target-dir would point at the latest build). A saved Live pin
         // has no copy: it starts the project's app, whose build may be wherever Cargo put it.
-        let found = if self.mode.keeps_copy() { crate::outputs::launch_inside(&app, godot) } else { crate::outputs::launch(&app, godot) };
+        let found = if self.mode.keeps_copy() { crate::outputs::launch_inside(&app, godot) } else { crate::outputs::launch_in(&app, godot, cargo) };
         found.ok_or_else(|| {
             ToolError::new(ErrorCode::NotFound, "There's nothing to start: no built program in this pin.")
                 .with_remediation("Pin a working build or open the folder to look.")
@@ -464,7 +466,9 @@ pub fn create(ws: &Workspace, mode: PinMode, name: Option<&str>, godot: Option<&
         Pin { version: PIN_VERSION, id, name, mode, created_ms: now_ms(), round, bytes: 0, shared_bytes: 0, copied_shared_bytes: 0, program: recorded_program };
     let made = (|| {
         (pin.bytes, pin.shared_bytes, pin.copied_shared_bytes) = copy(ws, &program, args.is_empty(), &pin.app_dir(ws), mode, progress)?;
-        pin.launch(ws, godot)?;
+        // Only copies are made here, and a copy's program is looked for inside it, where no
+        // Cargo environment applies.
+        pin.launch(ws, godot, &CargoEnv::default())?;
         save(ws, &pin)
     })();
     if let Err(e) = made {
@@ -675,7 +679,7 @@ mod tests {
         assert_eq!(pin.program, Some(PathBuf::from("target/release").join(exe("snake"))));
         for relative in [PathBuf::new(), PathBuf::from("../other"), d.path().join("outside")] {
             pin.program = Some(relative);
-            assert_eq!(pin.launch(&ws, None).unwrap_err().code, ErrorCode::BadInput);
+            assert_eq!(pin.launch(&ws, None, &CargoEnv::default()).unwrap_err().code, ErrorCode::BadInput);
         }
     }
 
@@ -689,7 +693,7 @@ mod tests {
         let mut pin = create(&ws, PinMode::Frozen, None, None, &mut |_, _| true).unwrap();
         pin.program = None;
         let own = pin.app_dir(&ws).join("target/release").join(exe("snake"));
-        assert_eq!(pin.launch(&ws, None).unwrap().0, own);
+        assert_eq!(pin.launch(&ws, None, &CargoEnv::default()).unwrap().0, own);
         std::fs::create_dir_all(ws.root.join(".cargo")).unwrap();
         std::fs::write(ws.root.join(".cargo/config.toml"), "[build]\ntarget-dir = \"shared-out\"\n").unwrap();
         let newer = ws.root.join("shared-out/release").join(exe("snake"));
@@ -697,7 +701,7 @@ mod tests {
         std::fs::write(&newer, b"the project's next build").unwrap();
         mark_program(&newer);
         std::fs::write(newer.with_extension("d"), format!("{}: {}\n", newer.display(), ws.app_dir().join("src/main.rs").display())).unwrap();
-        assert_eq!(pin.launch(&ws, None).unwrap().0, own, "the pin's own copy, not the project's newest build");
+        assert_eq!(pin.launch(&ws, None, &CargoEnv::default()).unwrap().0, own, "the pin's own copy, not the project's newest build");
     }
 
     /// A saved Live pin (made before they were retired) starts the project's own app, so it finds
@@ -721,7 +725,7 @@ mod tests {
         std::fs::write(shared.join("live-probe.d"), format!("{}: {}\n", program.display(), app.join("src/main.rs").display())).unwrap();
         let live = read_pin(br#"{"id":2,"name":"A","mode":"live","created_ms":5}"#).unwrap();
         assert_eq!(live.app_dir(&ws), app, "a Live pin runs the project's own app");
-        assert_eq!(live.launch(&ws, None).unwrap().0, program);
+        assert_eq!(live.launch(&ws, None, &CargoEnv::default()).unwrap().0, program);
     }
 
     /// A saved Live pin of a workspace member's project: Cargo builds the member into the
@@ -747,9 +751,31 @@ mod tests {
         let record = |source: &Path| std::fs::write(debug.join("member-probe.d"), format!("{}: {}\n", program.display(), source.display())).unwrap();
         let live = read_pin(br#"{"id":2,"name":"A","mode":"live","created_ms":5}"#).unwrap();
         record(&other);
-        assert!(live.launch(&ws, None).is_err(), "another project's program of that name isn't started");
+        assert!(live.launch(&ws, None, &CargoEnv::default()).is_err(), "another project's program of that name isn't started");
         record(&app.join("src/main.rs"));
-        assert_eq!(live.launch(&ws, None).unwrap().0, crate::workspace::normalized(&program));
+        assert_eq!(live.launch(&ws, None, &CargoEnv::default()).unwrap().0, crate::workspace::normalized(&program));
+    }
+
+    /// A saved Live pin looks where the environment it's given says Cargo builds, not where this
+    /// process's environment does.
+    #[test]
+    fn a_saved_live_pin_looks_where_its_given_environment_says() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = Workspace::create(d.path(), "Snake", "a snake game", TargetRef::None).unwrap();
+        let app = ws.app_dir();
+        std::fs::create_dir_all(app.join("src")).unwrap();
+        std::fs::write(app.join("Cargo.toml"), "[package]\nname = \"env-probe\"\n").unwrap();
+        std::fs::write(app.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let shared = d.path().join("shared");
+        let program = shared.join("debug").join(exe("env-probe"));
+        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+        std::fs::write(&program, b"program").unwrap();
+        mark_program(&program);
+        std::fs::write(shared.join("debug/env-probe.d"), format!("{}: {}\n", program.display(), app.join("src/main.rs").display())).unwrap();
+        let live = read_pin(br#"{"id":2,"name":"A","mode":"live","created_ms":5}"#).unwrap();
+        let given = CargoEnv { target_dir: Some(shared.clone().into()), ..CargoEnv::default() };
+        assert_eq!(live.launch(&ws, None, &given).unwrap().0, crate::workspace::normalized(&program));
+        assert!(live.launch(&ws, None, &CargoEnv::default()).is_err(), "no environment names that folder");
     }
 
     /// R5.7: a named program built outside the app (a moved Cargo target directory) is copied into
@@ -781,10 +807,10 @@ mod tests {
         assert_eq!(pin.program, Some(PathBuf::from(PIN_PROGRAM).join(exe("pin-probe"))), "the pin records its copy");
         assert!(copy.is_file(), "the program is copied into the pin");
         assert!(!pin.app_dir(&ws).join(PIN_PROGRAM).join(exe("other-project")).exists(), "another project's program is not");
-        let (started, args) = pin.launch(&ws, None).unwrap();
+        let (started, args) = pin.launch(&ws, None, &CargoEnv::default()).unwrap();
         assert_eq!((started, args), (copy.clone(), Vec::new()));
         std::fs::remove_file(&program).unwrap();
-        assert_eq!(pin.launch(&ws, None).unwrap().0, copy, "the frozen pin keeps its own copy");
+        assert_eq!(pin.launch(&ws, None, &CargoEnv::default()).unwrap().0, copy, "the frozen pin keeps its own copy");
     }
 
     #[test]

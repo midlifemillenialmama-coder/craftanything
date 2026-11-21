@@ -88,11 +88,20 @@ pub struct Session {
     /// Deep mode (`true`) or Clean room (`false`) for this process only, over
     /// `settings.deep_mode` and never saved: the CLI's `--deep` and `--clean-room`.
     pub deep_for_run: Option<bool>,
+    /// Where Cargo builds, as the environment says, for finding a Rust build by its files; `None`
+    /// reads this process's environment. Tests give one ([`crate::testing::session`]) so they
+    /// don't depend on this computer's Cargo home or `CARGO_TARGET_DIR`.
+    pub cargo_env: Option<crate::outputs::CargoEnv>,
 }
 
 impl Session {
     pub fn new(settings: Settings) -> Self {
         Session { settings, ..Default::default() }
+    }
+
+    /// [`Session::cargo_env`], or this process's environment when none was given.
+    pub fn cargo(&self) -> crate::outputs::CargoEnv {
+        self.cargo_env.clone().unwrap_or_else(crate::outputs::CargoEnv::of_process)
     }
 
     /// A session that keeps everything under `dir` (config.toml, plugin caches, the engine store,

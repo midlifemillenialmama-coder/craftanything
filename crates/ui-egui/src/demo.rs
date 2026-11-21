@@ -102,6 +102,8 @@ fn strings_evidence() -> Option<Evidence> {
 pub fn engine(mode: Mode, first_run_done: bool) -> Arc<Engine> {
     let settings = Settings { mode, first_run_done, language: "en".into(), ..Default::default() };
     let mut session = Session::new(settings);
+    // Nothing here reads this computer's Cargo setup either.
+    session.cargo_env = Some(craft_anything_engine::outputs::CargoEnv::default());
     session.add_target(sample_target());
     for e in [strings_evidence(), functions_evidence(), percent_evidence()].into_iter().flatten() {
         let _ = session.record(e);

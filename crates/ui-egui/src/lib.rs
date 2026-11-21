@@ -551,6 +551,9 @@ pub struct CraftApp {
     pub kinds: craft_anything_ai::rebuild::KindRegistry,
     /// Game engines on this computer (`None` until the first look finishes).
     pub game_engines: Option<craft_anything_engines::game::Inventory>,
+    /// Where Cargo builds, read from the session once, for finding the project's build by its
+    /// files ([`project::Facts`]).
+    pub cargo_env: craft_anything_engine::outputs::CargoEnv,
     /// Which asset providers have a key set up, by provider id (`None` until checked; the keys
     /// themselves never come into the app).
     pub asset_keys: Option<std::collections::BTreeMap<String, bool>>,
@@ -619,7 +622,10 @@ impl CraftApp {
     pub fn new(engine: Arc<Engine>, hub: Arc<AiHub>) -> Self {
         // Wait for the engine if it's busy: defaults here would show Clean room and no AI, and the
         // next settings change would save them over the person's own.
-        let settings = engine.session().settings.clone();
+        let (settings, cargo_env) = {
+            let session = engine.session();
+            (session.settings.clone(), session.cargo())
+        };
         i18n::set_language(&settings.language);
         let mut app = CraftApp {
             #[cfg(not(target_arch = "wasm32"))]
@@ -677,6 +683,7 @@ impl CraftApp {
             previews: Default::default(),
             kinds: craft_anything_ai::rebuild::KindRegistry::built_in(),
             game_engines: None,
+            cargo_env,
             asset_keys: None,
             backend_keys: None,
             backend_keys_request: 0,

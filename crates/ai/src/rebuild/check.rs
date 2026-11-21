@@ -3,9 +3,11 @@
 //! itself the way its toolchain says.
 
 use super::*;
+use std::ffi::OsStr;
 
-/// Run a step of a project's build in `app`: whether it succeeded, and what it printed.
-fn run_in(app: &Path, prog: &Path, args: &[String], minutes: u64, stop: &CheckStop) -> Result<(bool, String), String> {
+/// Run a step of a project's build in `app`, with `env` set for it on top of ours: whether it
+/// succeeded, and what it printed.
+fn run_in(app: &Path, prog: &Path, args: &[String], minutes: u64, stop: &CheckStop, env: &[(&str, &OsStr)]) -> Result<(bool, String), String> {
     // A round with a time limit (the builder's own checks) cuts a step that would run past it,
     // instead of waiting out the step's own, much longer, deadline.
     let limit = Duration::from_secs(minutes * 60);
@@ -14,7 +16,8 @@ fn run_in(app: &Path, prog: &Path, args: &[String], minutes: u64, stop: &CheckSt
     // zero deadline is seen and count as passed.
     stop.check().map_err(|e| e.message)?;
     let s = stop.clone();
-    craft_anything_platform::Process::new(prog)
+    env.iter()
+        .fold(craft_anything_platform::Process::new(prog), |p, (k, v)| p.env(k, v))
         .args(args)
         .cwd(app)
         .timeout(timeout)
@@ -33,9 +36,16 @@ fn run_in(app: &Path, prog: &Path, args: &[String], minutes: u64, stop: &CheckSt
 }
 
 /// Run one of a toolchain's commands in `app`.
-fn run_tool(app: &Path, tool: &stacks::Toolchain, command: &[String], minutes: u64, stop: &CheckStop) -> Result<(bool, String), String> {
+fn run_tool(
+    app: &Path,
+    tool: &stacks::Toolchain,
+    command: &[String],
+    minutes: u64,
+    stop: &CheckStop,
+    env: &[(&str, &OsStr)],
+) -> Result<(bool, String), String> {
     let Some((program, args)) = tool.command(app, command) else { return Err(format!("{} has no such command.", tool.name)) };
-    run_in(app, &program, &args, minutes, stop)
+    run_in(app, &program, &args, minutes, stop, env)
 }
 
 /// What a Unity without a licence prints, and what to tell the person.
@@ -44,14 +54,14 @@ const UNITY_LICENCE_FIX: &str = "Unity needs its free licence first: open Unity 
 
 /// A person's own project: its engine's build, else its toolchain's, else a static site. One we
 /// know no way to build isn't a failure, and the note says nothing ran.
-pub(super) fn own_build_check(app: &Path, place: &str, stack: &str, editor: Option<&Path>, stop: &CheckStop) -> (bool, String) {
+pub(super) fn own_build_check(app: &Path, place: &str, stack: &str, editor: Option<&Path>, stop: &CheckStop, env: &[(&str, &OsStr)]) -> (bool, String) {
     let engine = engine_for(stack, app);
     if let (Some(game::Builder::Unity), Some(ed)) = (engine, editor) {
-        return own_unity_check(app, ed, stop);
+        return own_unity_check(app, ed, stop, env);
     }
     match stacks::toolchain_in(app).filter(|_| engine.is_none()) {
-        Some(tool) => own_build(app, tool, stop),
-        None if engine.is_some() || static_site(app) => build_check(app, place, stack, editor, stop),
+        Some(tool) => own_build(app, tool, stop, env),
+        None if engine.is_some() || static_site(app) => build_check(app, place, stack, editor, stop, env),
         None => (true, "Nothing was built: Craft Anything doesn't know how to build this kind of project.".into()),
     }
 }
@@ -63,8 +73,8 @@ fn own_unity_args(app: &Path) -> Vec<String> {
     ["-batchmode", "-quit", "-nographics", "-projectPath", &app.display().to_string(), "-logFile", "-"].map(String::from).to_vec()
 }
 
-fn own_unity_check(app: &Path, editor: &Path, stop: &CheckStop) -> (bool, String) {
-    match run_in(app, editor, &own_unity_args(app), 4 * 60, stop) {
+fn own_unity_check(app: &Path, editor: &Path, stop: &CheckStop, env: &[(&str, &OsStr)]) -> (bool, String) {
+    match run_in(app, editor, &own_unity_args(app), 4 * 60, stop, env) {
         Ok((_, out)) if out.contains(UNITY_NO_LICENCE) => (false, UNITY_LICENCE_FIX.into()),
         Ok((true, _)) => (true, "The Unity project opened and its scripts compiled.".into()),
         Ok((false, out)) => (false, format!("Build failed: {}", error_lines(&out))),
@@ -72,8 +82,8 @@ fn own_unity_check(app: &Path, editor: &Path, stop: &CheckStop) -> (bool, String
     }
 }
 
-fn own_build(app: &Path, tool: &stacks::Toolchain, stop: &CheckStop) -> (bool, String) {
-    match run_tool(app, tool, &tool.build, 2 * 60, stop) {
+fn own_build(app: &Path, tool: &stacks::Toolchain, stop: &CheckStop, env: &[(&str, &OsStr)]) -> (bool, String) {
+    match run_tool(app, tool, &tool.build, 2 * 60, stop, env) {
         Ok((true, _)) => (true, format!("`{}` passed.", tool.build.join(" "))),
         Ok((false, out)) => (false, format!("Build failed: {}", error_lines(&out))),
         Err(e) => (false, format!("Couldn't run the build: {e}")),
@@ -82,7 +92,7 @@ fn own_build(app: &Path, tool: &stacks::Toolchain, stop: &CheckStop) -> (bool, S
 
 /// A person's own project: run its tests. Output that says none ran isn't a failure, and neither
 /// is a project we know no way to test, and the note says so.
-pub(super) fn own_tests_check(app: &Path, tool: Option<&stacks::Toolchain>, stop: &CheckStop) -> (bool, String) {
+pub(super) fn own_tests_check(app: &Path, tool: Option<&stacks::Toolchain>, stop: &CheckStop, env: &[(&str, &OsStr)]) -> (bool, String) {
     let Some(tool) = tool else { return (true, "No tests ran: Craft Anything doesn't know how to test this kind of project.".into()) };
     let says_none = |text: &str| tool.no_tests.iter().find(|n| text.contains(n.as_str())).cloned();
     if let Some(name) = &tool.test_script {
@@ -93,7 +103,7 @@ pub(super) fn own_tests_check(app: &Path, tool: Option<&stacks::Toolchain>, stop
             return (true, format!("No tests ran: package.json has no `{name}` script to run."));
         }
     }
-    match run_tool(app, tool, &tool.test, 30, stop) {
+    match run_tool(app, tool, &tool.test, 30, stop, env) {
         Ok((true, _)) => (true, format!("`{}` passed.", tool.test.join(" "))),
         Ok((false, out)) => match says_none(&out).filter(|_| tool.test_script.is_none()) {
             Some(why) => (true, format!("No tests ran: {}.", why.trim_end_matches('.'))),
@@ -113,8 +123,8 @@ fn last_lines(out: &str, n: usize) -> String {
 /// For non-website builds: run the project's build (its engine's own, for Unity, Unreal and
 /// Godot) and report whether it succeeded, with a note (the first error lines when it didn't).
 /// `place` says where `app` is, for messages (`Workspace::app_place`).
-pub(super) fn build_check(app: &Path, place: &str, stack: &str, editor: Option<&Path>, stop: &CheckStop) -> (bool, String) {
-    let run = |prog: &Path, args: &[String], minutes: u64| run_in(app, prog, args, minutes, stop).map_err(|e| format!("Couldn't run the build: {e}"));
+pub(super) fn build_check(app: &Path, place: &str, stack: &str, editor: Option<&Path>, stop: &CheckStop, env: &[(&str, &OsStr)]) -> (bool, String) {
+    let run = |prog: &Path, args: &[String], minutes: u64| run_in(app, prog, args, minutes, stop, env).map_err(|e| format!("Couldn't run the build: {e}"));
     let app_abs = craft_anything_engine::workspace::absolute(app);
     let app_s = app_abs.display().to_string();
     let built = || packaged_program(&app_abs.join("Build")).is_some();
@@ -182,7 +192,7 @@ pub(super) fn build_check(app: &Path, place: &str, stack: &str, editor: Option<&
                         (false, missing(app, place, format!("No project to build found in {place} yet.")))
                     }
                 },
-                |tool| own_build(app, tool, stop),
+                |tool| own_build(app, tool, stop, env),
             );
         }
         _ => return (false, missing(app, place, format!("No project to build found in {place} yet."))),
@@ -272,12 +282,16 @@ mod tests {
         stacks::Toolchain { build: command.clone(), test: command, no_tests: no_tests.iter().map(|s| s.to_string()).collect(), ..Default::default() }
     }
 
-    /// Exercise the actual Go catalogue commands through the existing-project check path.
+    /// Exercise the actual Go catalogue commands through the existing-project check path. Go's
+    /// build cache and module folder go to the test's temp folder, not the real home.
     #[test]
     #[ignore = "requires Go on PATH; runs an owned project without dependencies"]
     fn real_go_project_build_and_tests() {
-        let project = tempfile::tempdir().unwrap();
-        let app = project.path();
+        let temp = tempfile::tempdir().unwrap();
+        let (app, cache, gopath) = (temp.path().join("app"), temp.path().join("gocache"), temp.path().join("gopath"));
+        std::fs::create_dir(&app).unwrap();
+        let app = app.as_path();
+        let env = [("GOCACHE", cache.as_os_str()), ("GOPATH", gopath.as_os_str())];
         let stop = CheckStop::default();
         std::fs::write(app.join("go.mod"), "module example.invalid/probe\n\ngo 1.18\n").unwrap();
         std::fs::write(app.join("main.go"), "package main\nfunc answer() int { return 42 }\nfunc main() {}\n").unwrap();
@@ -294,10 +308,11 @@ func TestAnswer(t *testing.T) {
         let tool = stacks::toolchain_in(app).expect("go.mod identifies the Go toolchain");
         assert_eq!(tool.name, "Go");
 
-        let build = || own_build_check(app, "the project folder", stacks::BUILDERS_CHOICE, None, &stop);
-        let test = || own_tests_check(app, Some(tool), &stop);
+        let build = || own_build_check(app, "the project folder", stacks::BUILDERS_CHOICE, None, &stop, &env);
+        let test = || own_tests_check(app, Some(tool), &stop, &env);
         assert_eq!(build(), (true, "`go build ./...` passed.".into()));
         assert_eq!(test(), (true, "`go test ./...` passed.".into()));
+        assert!(cache.join("README").is_file(), "Go's build cache is the test's own");
 
         std::fs::write(&tests, passing_test.replace("!= 42", "!= 43")).unwrap();
         assert!(build().0, "a test assertion must not fail the build");
@@ -313,7 +328,7 @@ func TestAnswer(t *testing.T) {
     #[test]
     fn a_persons_own_tests_decide_and_no_tests_is_no_failure() {
         let (d, stop) = (tempfile::tempdir().unwrap(), CheckStop::default());
-        let tests = |tool: &stacks::Toolchain| own_tests_check(d.path(), Some(tool), &stop);
+        let tests = |tool: &stacks::Toolchain| own_tests_check(d.path(), Some(tool), &stop, &[]);
         assert!(tests(&stand_in("exit 0", &[])).0);
         let (passed, note) = tests(&stand_in("echo 'adds: 4 is not 5'; echo; echo '1 failed'; exit 1", &[]));
         assert!(!passed && note.ends_with("adds: 4 is not 5\n1 failed"), "the summary, not only lines saying error: {note}");
@@ -322,7 +337,7 @@ func TestAnswer(t *testing.T) {
         let missing = stacks::Toolchain { test: vec!["no-such-program-here".into()], ..Default::default() };
         let (passed, note) = tests(&missing);
         assert!(!passed && note.starts_with("Couldn't run the tests"), "{note}");
-        let (passed, note) = own_tests_check(d.path(), None, &stop);
+        let (passed, note) = own_tests_check(d.path(), None, &stop, &[]);
         assert!(passed && note.starts_with("No tests ran"), "{note}");
     }
 
@@ -334,7 +349,7 @@ func TestAnswer(t *testing.T) {
         std::fs::write(d.path().join("own-sh.bat"), "not for this system").unwrap();
         let test = ["no-such-program-here", "-c", "echo 'error: from its own copy'; exit 1"].map(String::from).to_vec();
         let tool = stacks::Toolchain { test, local_programs: vec!["not-here".into(), "own-sh.bat".into(), "own-sh".into()], ..Default::default() };
-        let (passed, note) = own_tests_check(d.path(), Some(&tool), &stop);
+        let (passed, note) = own_tests_check(d.path(), Some(&tool), &stop, &[]);
         assert!(!passed && note.contains("from its own copy"), "{note}");
     }
 
@@ -350,7 +365,7 @@ func TestAnswer(t *testing.T) {
         };
         let printing = |tool: &stacks::Toolchain, line: &str| {
             let test = ["sh", "-c", "printf '%s\\n' \"$1\"; exit 2", "sh", line].map(String::from).to_vec();
-            own_tests_check(d.path(), Some(&stacks::Toolchain { test, ..tool.clone() }), &stop).0
+            own_tests_check(d.path(), Some(&stacks::Toolchain { test, ..tool.clone() }), &stop, &[]).0
         };
         let (make, node) = (named_by("Makefile"), named_by("package.json"));
         assert!(printing(make, "make: *** No rule to make target `test'.  Stop."));
@@ -372,12 +387,12 @@ func TestAnswer(t *testing.T) {
         let node = stacks::Toolchain { test: vec!["no-such-program-here".into()], windows_program: None, ..table.clone() };
         for json in [r#"{"name":"x"}"#, r#"{"scripts":{"test":"echo \"Error: no test specified\" && exit 1"}}"#] {
             std::fs::write(d.path().join("package.json"), json).unwrap();
-            let (passed, note) = own_tests_check(d.path(), Some(&node), &stop);
+            let (passed, note) = own_tests_check(d.path(), Some(&node), &stop, &[]);
             assert!(passed && note.starts_with("No tests ran"), "nothing is started: {note}");
         }
         let real = r#"{"scripts":{"test":"jest && echo 'no test specified for integration'"}}"#;
         std::fs::write(d.path().join("package.json"), real).unwrap();
-        let (passed, note) = own_tests_check(d.path(), Some(&node), &stop);
+        let (passed, note) = own_tests_check(d.path(), Some(&node), &stop, &[]);
         assert!(!passed && note.starts_with("Couldn't run the tests"), "it's started: {note}");
     }
 
@@ -396,9 +411,22 @@ func TestAnswer(t *testing.T) {
     #[test]
     fn a_persons_own_build_is_judged_by_its_toolchain() {
         let (d, stop) = (tempfile::tempdir().unwrap(), CheckStop::default());
-        assert!(own_build(d.path(), &stand_in("exit 0", &[]), &stop).0);
-        let (passed, note) = own_build(d.path(), &stand_in("echo 'error: no such file'; exit 2", &[]), &stop);
+        assert!(own_build(d.path(), &stand_in("exit 0", &[]), &stop, &[]).0);
+        let (passed, note) = own_build(d.path(), &stand_in("echo 'error: no such file'; exit 2", &[]), &stop, &[]);
         assert!(!passed && note.contains("no such file"), "{note}");
+    }
+
+    /// What a check is given for its program's environment reaches the program, for the build
+    /// and for the tests alike.
+    #[cfg(unix)]
+    #[test]
+    fn a_checks_program_gets_the_environment_it_is_given() {
+        let (d, stop) = (tempfile::tempdir().unwrap(), CheckStop::default());
+        let tool = stand_in(r#"test "$CRAFT_PROBE" = given"#, &[]);
+        let env = [("CRAFT_PROBE", OsStr::new("given"))];
+        assert!(own_build(d.path(), &tool, &stop, &env).0);
+        assert!(own_tests_check(d.path(), Some(&tool), &stop, &env).0);
+        assert!(!own_build(d.path(), &tool, &stop, &[]).0, "nothing is set without being given");
     }
 
     /// A round with a time limit cuts a running build step at the limit, instead of waiting out
@@ -410,7 +438,7 @@ func TestAnswer(t *testing.T) {
         let limited = CheckStop::limited(Instant::now() + Duration::from_millis(1_200));
         let args = ["-c", "sleep 30; exit 7"].map(String::from).to_vec();
         let began = Instant::now();
-        let out = run_in(d.path(), Path::new("sh"), &args, 60, &limited).unwrap_err();
+        let out = run_in(d.path(), Path::new("sh"), &args, 60, &limited, &[]).unwrap_err();
         assert!(began.elapsed() < Duration::from_secs(10), "the step ran past the round's limit: {} s", began.elapsed().as_secs());
         assert!(out.contains("stopped"), "the step's own program was stopped: {out}");
         assert!(limited.expired() && limited.cancelled() && limited.time_left().is_some_and(|l| l.is_zero()));
@@ -429,7 +457,7 @@ func TestAnswer(t *testing.T) {
         let d = tempfile::tempdir().unwrap();
         let marker = d.path().join("started");
         let args = ["-c", "touch started"].map(String::from).to_vec();
-        let started = |stop: &CheckStop| run_in(d.path(), Path::new("sh"), &args, 60, stop);
+        let started = |stop: &CheckStop| run_in(d.path(), Path::new("sh"), &args, 60, stop, &[]);
         let e = started(&CheckStop::limited(Instant::now())).unwrap_err();
         assert!(e.contains("time limit"), "{e}");
         assert!(!marker.exists(), "the step ran after the round's limit");
@@ -445,11 +473,11 @@ func TestAnswer(t *testing.T) {
         let stop = CheckStop::default();
         let notes = tempfile::tempdir().unwrap();
         std::fs::write(notes.path().join("notes.md"), "ideas").unwrap();
-        let (passed, note) = own_build_check(notes.path(), "the project folder", stacks::BUILDERS_CHOICE, None, &stop);
+        let (passed, note) = own_build_check(notes.path(), "the project folder", stacks::BUILDERS_CHOICE, None, &stop, &[]);
         assert!(passed && note.starts_with("Nothing was built"), "{note}");
         let site = tempfile::tempdir().unwrap();
         std::fs::write(site.path().join("index.html"), "<p>hi</p>").unwrap();
-        let (passed, note) = own_build_check(site.path(), "the project folder", "Plain HTML and CSS", None, &stop);
+        let (passed, note) = own_build_check(site.path(), "the project folder", "Plain HTML and CSS", None, &stop, &[]);
         assert!(passed && note.contains("static site"), "{note}");
     }
 
@@ -482,7 +510,7 @@ func TestAnswer(t *testing.T) {
         let d = tempfile::tempdir().unwrap();
         let app = d.path();
         let stop = CheckStop::default();
-        let check = |place| build_check(app, place, "Rust + egui (eframe)", None, &stop);
+        let check = |place| build_check(app, place, "Rust + egui (eframe)", None, &stop, &[]);
         assert_eq!(check("app/"), (false, "No project to build found in app/ yet.".into()), "nothing anywhere");
         std::fs::create_dir(app.join("notes")).unwrap();
         assert_eq!(check("app/").1, "No project to build found in app/ yet.", "a folder without a project");
@@ -502,7 +530,7 @@ func TestAnswer(t *testing.T) {
         );
         // The engines' own missing-project notes say it too.
         let unity = Path::new("C:/Engines/Unity/Editor/Unity.exe");
-        let note = build_check(app, "app/", "Unity", Some(unity), &stop).1;
+        let note = build_check(app, "app/", "Unity", Some(unity), &stop, &[]).1;
         assert!(note.starts_with("No Unity project found in app/ yet. There's a Cargo.toml one folder down, in app/app/"), "{note}");
     }
 
@@ -527,7 +555,7 @@ func TestAnswer(t *testing.T) {
         std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let stop = CheckStop::default();
-        assert!(build_check(app, "app/", "Unity", Some(&editor), &stop).0);
+        assert!(build_check(app, "app/", "Unity", Some(&editor), &stop, &[]).0);
         let args = std::fs::read_to_string(app.join("args.txt")).unwrap();
         let project = args.lines().skip_while(|l| *l != "-projectPath").nth(1).unwrap();
         assert!(Path::new(project).is_absolute(), "{project}");
@@ -546,7 +574,7 @@ func TestAnswer(t *testing.T) {
         let app = d.path();
         let stop = CheckStop::default();
         let passed = (true, "Nothing to build: a static site.".to_string());
-        let check = |stack, editor| build_check(app, "app/", stack, editor, &stop);
+        let check = |stack, editor| build_check(app, "app/", stack, editor, &stop, &[]);
         assert!(!check("Plain HTML and CSS", None).0, "nothing there yet");
 
         // #496: the page itself, with no manifest.
@@ -583,6 +611,6 @@ func TestAnswer(t *testing.T) {
         let built = tempfile::tempdir().unwrap();
         std::fs::create_dir(built.path().join("dist")).unwrap();
         std::fs::write(built.path().join("dist").join("index.html"), "<h1>Hello</h1>").unwrap();
-        assert_eq!(build_check(built.path(), "app/", "Builder's choice", None, &stop), passed);
+        assert_eq!(build_check(built.path(), "app/", "Builder's choice", None, &stop, &[]), passed);
     }
 }

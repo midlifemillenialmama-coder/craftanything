@@ -1540,7 +1540,16 @@ Owner: maintainers · Status: in progress
       the opt-in engine test records `alpha` and `beta` in order and reports a debugger refusal
       for a non-executable input. Verified with Apple LLDB 2100.0.16.4 on arm64 macOS 27.0.1
       — PR #1844; claimed: rudycelekli, branch test/r2.4-verify-lldb-call-observation
-- [ ] Window capture tried on macOS and Linux (only Windows so far); games behind a launcher
+- [x] Window capture on Linux: `native_window_capture` pictures a window on the X display (an X11
+      session, or XWayland under Wayland) over the X protocol itself (`x11rb`, no C libraries), by
+      the program's or a descendant's `_NET_WM_PID`, else by its `WM_CLASS` name as a launcher's
+      program is found on Windows and macOS. Without an X display it's refused before the program
+      starts, and on Wayland it says why (no screenshot portal yet). Unit tests only: not run on a
+      Linux desktop — branch feature/r2.4-window-capture-macos-linux — PR #2241
+- [ ] Window capture tried live on macOS and on a Linux X11 desktop and XWayland, and a game behind
+      a launcher. An opt-in macOS probe (`a_started_programs_window_is_pictured`) exists; run with
+      the screen locked, it found no window: say the screen is locked, as for Screen Recording
+- [ ] Picture a Wayland program's own window through the desktop's screenshot portal
 - [ ] Short scripted input sessions (enigo) to record screens of the original
 - [x] A macOS app bundle picked as an app target (`TipCalc.app`) is studied as a plain folder: the
       study finds no program in it ("Couldn't find the program to decompile"), so Deep mode skips

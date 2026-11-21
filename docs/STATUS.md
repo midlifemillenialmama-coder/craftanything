@@ -833,7 +833,9 @@ launch or preview was run for this documentation correction.
 - In Deep mode, app and game targets get a static study (triage, engine detection, file
   inventory, JS app graph, Ghidra when installed); in Clean room only the person's pictures and
   words. With runtime study on, the original is also started once for a
-  picture of its window and its UI tree (Windows and macOS); it isn't driven or watched over time.
+  picture of its window (Windows, macOS, and Linux with an X display: X11 or XWayland, not a
+  Wayland program's own window) and its UI tree (Windows and macOS); it isn't driven or watched
+  over time. The Linux picture is unit-tested only, not run on a Linux desktop yet.
 - Several projects build at once (`[build] parallel`, 2 by default; Settings → Builds); more wait
   their turn. Queued builds start on their own as places come free, from MCP too. A build with an
   API key works alone, for now: it shares the app's session, so others wait for it and it for them.

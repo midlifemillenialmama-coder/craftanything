@@ -1541,7 +1541,26 @@ Owner: maintainers · Status: in progress
       for a non-executable input. Verified with Apple LLDB 2100.0.16.4 on arm64 macOS 27.0.1
       — PR #1844; claimed: rudycelekli, branch test/r2.4-verify-lldb-call-observation
 - [ ] Window capture tried on macOS and Linux (only Windows so far); games behind a launcher
-- [ ] Short scripted input sessions (enigo) to record screens of the original
+- [x] Short scripted input sessions (enigo) to record screens of the original
+      — claimed: 4DMAX, branch feature/r2.4-scripted-input
+      `native_input_record` (Windows, macOS): keys, chords, typing, pointer moves and clicks in
+      the program's own window, with pictures at the start, at `picture` steps and at the end.
+      Nothing is sent unless that window is in front, checked before each key, chord, move and
+      click and while a key is held (a `type` step once, before its text); held keys are always
+      released, also after focus is lost. Letters and digits are sent as keys, not characters:
+      on a Mac by position (ANSI key codes); on Windows as virtual keys, which follow the layout
+      in front, so on AZERTY or Dvorak a letter isn't at its QWERTY place.
+      Run live on Windows 11 against a probe window (typing, a chord, two clicks; see STATUS)
+- [ ] Run `native_input_record` live on macOS against a small window program (its ANSI key
+      codes for letters and digits have not been run), and on Windows against a real game
+      behind a launcher and with the person clicking elsewhere mid-script (`focus_lost`)
+- [ ] Keep track of a launcher's children during the start wait, so one that exits before the
+      window search begins can't leave its child unfound on macOS and Linux (reparented)
+- [ ] Games that read keyboard scan codes or raw input may ignore the virtual keys
+      `native_input_record` sends: send scan codes too, and say in the evidence when the
+      pictures before and after a step don't differ
+- [ ] `native_input_record` on Linux (X11 through enigo's x11rb; Wayland needs a portal), with
+      window capture there
 - [x] A macOS app bundle picked as an app target (`TipCalc.app`) is studied as a plain folder: the
       study finds no program in it ("Couldn't find the program to decompile"), so Deep mode skips
       Ghidra, the console runs and the window picture. Study the program its `Info.plist` names

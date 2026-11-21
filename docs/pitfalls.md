@@ -1136,6 +1136,14 @@ list: scan the folders people keep such things in (`KnownRoot`, by folder name, 
 levels down), and make an install use a copy already found outside our store. Test each layout
 (unzipped, cask, capitalised name) with temp folders, not the machine the test runs on.
 
+**A key sent as a character, through someone else's keyboard layout.** `native_input_record`
+first sent a script's `c` as enigo's `Key::Unicode('c')`, which maps it through the layout of the
+window in front; with an Arabic layout active there is no such key, so enigo typed the character
+as text on both the press and the release, without Shift: Shift+C gave "cc". Every stand-in test
+passed; only a live run on a machine with a second layout showed it. A key a script presses is a
+place on the keyboard (a virtual-key or ANSI key code), text is typed as text, and a live input
+run happens on a machine whose layout isn't US English.
+
 **A per-run id that a provider expects to be stable.** OpenCode Go refuses a request without
 `x-opencode-session` (#1225). The header was sent, but only for backends saved with an id, so
 backends from older versions or found from a key got a new id on every run. A fallback id for one

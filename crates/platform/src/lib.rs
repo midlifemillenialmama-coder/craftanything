@@ -10,6 +10,7 @@ pub mod cancel;
 pub mod capture;
 pub mod display;
 pub mod fs;
+pub mod input;
 pub mod process;
 pub mod retry;
 pub mod serve;

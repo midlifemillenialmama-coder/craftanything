@@ -50,3 +50,11 @@ the open-source licence; see `docs/brand/LICENSE-brand.txt`.
 Builds made with `CRAFT_FONTS_DIR` (craft-fonts), releases among them, also embed the fonts in
 that folder (all OFL-1.1). Their packages ship each one's licence as `OFL-<font>.txt`; craft-fonts'
 own `ATTRIBUTION.md` names their authors and pinned sources.
+
+## Test fixtures
+
+Files only tests read; they are not shipped.
+
+| File | What | Source | Licence | How obtained |
+|---|---|---|---|---|
+| `crates/testkit/fixtures/unity_crunch/dxt1.crn`, `dxt5.crn` | 512×512 picture of Ferris the Rustacean as Unity's crunch fork writes it (DXT1, DXT5) | https://github.com/UniversalGameExtraction/texture2ddecoder, `resources/tests/textures/UNITYCRUNCH_DXT1.crn` and `UNITYCRUNCH_DXT5.crn` at commit 551fcbfbe86c05424ccc2ff942525c0ec7171d65 (added in its PR #1); sha256 `bfe5f953…84ef`, `5dc5e390…2735`. The picture: Ferris, https://rustacean.net, CC0 by Karen Rustad Tölva | MIT OR Apache-2.0 (the texture2ddecoder repository) | Downloaded unchanged and renamed |

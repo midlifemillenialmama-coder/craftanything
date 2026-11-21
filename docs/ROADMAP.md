@@ -2213,6 +2213,11 @@ Gaps found while using the app for real projects.
       A maintainer's call, made by merging: Simple's larger text was there for people who find
       small text hard to read, and this leaves that to zoom
       — claimed: jgt87, branch feature/r2.9-one-size-both-modes — PR #1236
+- [x] Make offers "Extracted by" beside the game's other choices: in Deep mode an AI with an API key
+      can take a game's own files out after the study, but it could only be chosen in Settings → AI,
+      so on Make only the builder could be picked. It sets the app's one extractor and says so
+      (choosing one per project would need the run to take it from the project; not in this change)
+      — claimed: jgt87, branch feature/r2.9-make-extracted-by — PR #1290
 
 ### R2.10 Pinned builds
 Owner: maintainers · Status: in progress
